@@ -25,6 +25,7 @@ const app = await buildApp({
   gitSubdir: env.GIT_SUBDIR || 'diagrams',
   gitSyncSeconds: env.GIT_SYNC_INTERVAL ? Number(env.GIT_SYNC_INTERVAL) : 300,
   webRoot: env.WEB_ROOT || join(root, 'dist'),
+  publicUrl: env.PUBLIC_URL || null,
   admin: { email: env.ADMIN_EMAIL || 'admin', password: env.ADMIN_PASSWORD, name: env.ADMIN_NAME || 'Administrateur' },
   sessionSecret: env.SESSION_SECRET,
   secureCookies: env.COOKIE_SECURE === 'true' ? true : env.COOKIE_SECURE === 'false' ? false : 'auto',

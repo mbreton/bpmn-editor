@@ -78,5 +78,5 @@ export function createAuth({ db, sessionSecret, secureCookies }) {
     return user && user.status === 'active' ? user : null;
   }
 
-  return { bootstrapAdmin, login, issueSession, clearSession, currentUser, hashPassword, verifyPassword };
+  return { bootstrapAdmin, login, issueSession, clearSession, currentUser, hashPassword, verifyPassword, secret };
 }

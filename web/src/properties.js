@@ -3,7 +3,7 @@
 // le service "modeling" : elles sont annulables (Ctrl+Z).
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { h, esc, dialog } from './dom.js';
-import { TYPE_LABELS, DEF_LABELS, explainIso } from './i18n.js';
+import { TYPE_LABELS, DEF_LABELS, explainIso } from '../../shared/i18n.js';
 import { entryFor } from './catalog.js';
 
 const TIMER_KINDS = [

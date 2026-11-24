@@ -27,12 +27,12 @@ export function dialog({ title, body = '', input, buttons }) {
   return new Promise(resolve => {
     const el = h(`<div class="modal" role="dialog" aria-modal="true"><div class="modal-box">
       <h2></h2><div class="modal-body"></div>
-      ${input ? `<input class="field" type="${input.type || 'text'}" autocomplete="${input.autocomplete || 'off'}">` : ''}
+      ${input ? `<input class="field dlg-input" type="${input.type || 'text'}" autocomplete="${input.autocomplete || 'off'}">` : ''}
       <div class="modal-actions"></div></div></div>`);
     $('h2', el).textContent = title;
     const bodyEl = $('.modal-body', el);
     if (body instanceof Node) bodyEl.append(body); else bodyEl.textContent = body;
-    const field = $('input', el);
+    const field = input ? $(".dlg-input", el) : null;
     if (field) { field.value = input.value || ''; field.placeholder = input.placeholder || ''; }
     const actions = $('.modal-actions', el);
     const close = v => { el.remove(); document.removeEventListener('keydown', onKey); resolve(v); };

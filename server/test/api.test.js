@@ -86,40 +86,64 @@ test('cookie Secure seulement en HTTPS', async () => {
 });
 
 let diagramId;
-test('création, verrou, enregistrement signé par l\'utilisateur, conflit, historique Git', async () => {
+test('création, verrou, brouillon continu, annuler/rétablir, version Git signée', async () => {
   const d = (await call('POST', '/api/diagrams', { cookie: aliceCookie, body: { name: 'Onboarding Client' } })).json();
   diagramId = d.id;
   assert.equal(d.path, 'diagrams/onboarding-client.bpmn');
 
   const full = (await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie })).json();
   assert.equal(full.version, 1);
-  assert.match(full.rev, /^[0-9a-f]{40}$/);
+  assert.equal(full.draft.dirty, false);
 
-  // enregistrer sans verrou est refusé
+  // écrire le brouillon sans verrou est refusé
   const xml2 = full.xml.replace('name="Début"', 'name="Départ"');
-  assert.equal((await call('PUT', `/api/diagrams/${d.id}`, { cookie: aliceCookie, body: { xml: xml2, baseRev: full.rev, holder: 'A' } })).statusCode, 423);
+  const xml3 = xml2.replace('name="Départ"', 'name="Demande reçue"');
+  assert.equal((await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: xml2, holder: 'A' } })).statusCode, 423);
 
   assert.equal((await call('POST', `/api/diagrams/${d.id}/lock`, { cookie: aliceCookie, body: { holder: 'A' } })).json().acquired, true);
   const other = (await call('POST', `/api/diagrams/${d.id}/lock`, { cookie: adminCookie, body: { holder: 'B' } })).json();
   assert.equal(other.acquired, false);
   assert.equal(other.lock.author, 'Alice Martin');
 
-  const saved = await call('PUT', `/api/diagrams/${d.id}`, { cookie: aliceCookie, body: { xml: xml2, baseRev: full.rev, holder: 'A', message: 'Renommage du début' } });
-  assert.equal(saved.statusCode, 200, saved.body);
-  assert.equal(saved.json().version, 2);
-  assert.equal(saved.json().updatedBy, 'Alice Martin');
+  // deux étapes de brouillon : aucun commit Git
+  const commitsBefore = git(join(tmp, 'repo'), 'rev-list', '--count', 'HEAD').trim();
+  let r = (await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: xml2, holder: 'A', label: 'Renommer le début' } })).json();
+  assert.equal(r.dirty, true);
+  r = (await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: xml3, holder: 'A', label: 'Préciser le début' } })).json();
+  assert.equal(git(join(tmp, 'repo'), 'rev-list', '--count', 'HEAD').trim(), commitsBefore, 'pas de commit pendant l\'édition');
+  assert.match((await call('GET', `/api/diagrams/${d.id}`, { cookie: adminCookie })).json().xml, /Demande reçue/, 'le brouillon est visible des autres');
 
-  // révision de départ périmée → conflit
-  assert.equal((await call('PUT', `/api/diagrams/${d.id}`, { cookie: aliceCookie, body: { xml: xml2 + ' ', baseRev: full.rev, holder: 'A' } })).statusCode, 409);
+  // annuler / rétablir
+  let u = (await call('POST', `/api/diagrams/${d.id}/undo`, { cookie: aliceCookie, body: { holder: 'A' } })).json();
+  assert.match(u.xml, /name="Départ"/);
+  assert.match(u.label, /Préciser le début/);
+  u = (await call('POST', `/api/diagrams/${d.id}/undo`, { cookie: aliceCookie, body: { holder: 'A' } })).json();
+  assert.match(u.xml, /name="Début"/);
+  assert.equal(u.draft.dirty, false);
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/undo`, { cookie: aliceCookie, body: { holder: 'A' } })).statusCode, 409, 'rien avant la version enregistrée');
+  u = (await call('POST', `/api/diagrams/${d.id}/redo`, { cookie: aliceCookie, body: { holder: 'A' } })).json();
+  assert.match(u.xml, /name="Départ"/);
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/undo`, { cookie: adminCookie, body: {} })).statusCode, 423, 'un autre ne peut pas annuler pendant qu\'Alice modifie');
+
+  // version Git à la demande
+  const c = await call('POST', `/api/diagrams/${d.id}/commit`, { cookie: aliceCookie, body: { message: 'Renommage du début' } });
+  assert.equal(c.statusCode, 200, c.body);
+  assert.equal(c.json().version, 2);
+  assert.equal(c.json().draft.dirty, false);
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/commit`, { cookie: aliceCookie, body: { message: 'x' } })).statusCode, 409, 'rien à enregistrer');
 
   const versions = (await call('GET', `/api/diagrams/${d.id}/versions`, { cookie: aliceCookie })).json();
   assert.deepEqual(versions.map(v => [v.version, v.author, v.email]), [[2, 'Alice Martin', 'alice@test.fr'], [1, 'Alice Martin', 'alice@test.fr']]);
   assert.equal(versions[0].message, 'Renommage du début');
   const v1 = (await call('GET', `/api/diagrams/${d.id}/versions/${versions[1].sha}`, { cookie: aliceCookie })).json();
   assert.match(v1.xml, /name="Début"/);
-
-  // le commit est bien dans le dépôt, avec Alice comme auteur
   assert.match(git(join(tmp, 'repo'), 'log', '-1', '--format=%an <%ae>'), /Alice Martin <alice@test.fr>/);
+
+  // retour à une version : dans le brouillon, annulable
+  const back = (await call('POST', `/api/diagrams/${d.id}/restore`, { cookie: aliceCookie, body: { holder: 'A', sha: versions[1].sha.slice(0, 7) } })).json();
+  assert.match(back.xml, /name="Début"/);
+  assert.equal(back.draft.dirty, true);
+  await call('POST', `/api/diagrams/${d.id}/undo`, { cookie: aliceCookie, body: { holder: 'A' } });
   await call('POST', `/api/diagrams/${d.id}/unlock`, { cookie: aliceCookie, body: { holder: 'A' } });
 });
 

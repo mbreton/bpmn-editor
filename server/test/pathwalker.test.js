@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { BpmnModdle } from 'bpmn-moddle';
-import { createWalker } from '../../web/src/pathwalker.js';
+import { createWalker } from '../../shared/pathwalker.js';
 
 const xml = readFileSync(new URL('./fixtures/onboarding.bpmn', import.meta.url), 'utf8');
 const load = async () => createWalker((await new BpmnModdle().fromXML(xml)).rootElement);

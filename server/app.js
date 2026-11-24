@@ -2,6 +2,7 @@ import Fastify from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import fastifyRateLimit from '@fastify/rate-limit';
+import fastifyWebsocket from '@fastify/websocket';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from './db.js';
@@ -10,6 +11,9 @@ import { createAi, AiError } from './ai.js';
 import { createGitStore, GitError } from './git.js';
 import { createDiagrams } from './diagrams.js';
 import { checkBpmn } from './validate.js';
+import { createHub } from './realtime.js';
+import { registerOAuth } from './oauth.js';
+import { createMcp } from './mcp.js';
 
 const MAX_XML = 1_500_000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -22,6 +26,8 @@ export async function buildApp(config) {
   const ai = createAi(config.ai || {});
   const git = createGitStore({ dir: config.gitDir, remote: config.gitRemote, branch: config.gitBranch || 'main', subdir: config.gitSubdir || 'diagrams', log });
   const diagrams = createDiagrams({ db, git });
+  const hub = createHub({ log });
+  const mcp = createMcp({ db, diagrams, hub });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
   await git.init();
@@ -44,6 +50,8 @@ export async function buildApp(config) {
 
   await app.register(fastifyCookie);
   await app.register(fastifyRateLimit, { global: true, max: 600, timeWindow: '1 minute' });
+  await app.register(fastifyWebsocket);
+  const oauth = registerOAuth(app, { db, auth, publicUrl: config.publicUrl, secret: auth.secret });
 
   app.addHook('onSend', async (req, reply, payload) => {
     reply.header('x-content-type-options', 'nosniff');
@@ -206,19 +214,88 @@ export async function buildApp(config) {
     } catch (e) { return gitFail(reply, e); }
   });
 
-  app.put('/api/diagrams/:id', async (req, reply) => {
+  // ---------- brouillon (sauvegarde continue), annuler/rétablir, versions ----------
+  const holdsLock = (d, holder) => d.lock && d.lock.holder === holder;
+  const lockedByOther = (d, u) => d.lock && d.lock.userId !== u.id;
+
+  app.put('/api/diagrams/:id/draft', async (req, reply) => {
     const u = requireUser(req, reply); if (!u) return;
-    const { xml, baseRev, holder, message } = req.body || {};
+    const { xml, holder, label, via } = req.body || {};
     if (!isXml(xml)) return fail(reply, 400, 'XML BPMN invalide ou trop volumineux.');
-    if (!str(holder, 100)) return fail(reply, 400, 'holder requis.');
-    if (baseRev !== null && typeof baseRev !== 'string') return fail(reply, 400, 'baseRev requis.');
+    const d = db.getDiagram(req.params.id);
+    if (!d) return fail(reply, 404, 'Diagramme introuvable.');
+    if (!holdsLock(d, holder)) return fail(reply, 423, d.lock ? `${d.lock.author} modifie ce diagramme.` : 'Reprenez la main (bouton « Modifier »).', { lock: d.lock });
+    const author = via === 'claude' ? { ...u, name: `${u.name} (via Claude)` } : u;
+    const r = await diagrams.writeDraft(d.id, { xml, user: author, label: str(label, 300) ? label : 'Modification', source: via === 'claude' ? 'mcp' : 'web' });
+    if (r.changed) hub.broadcast(d.id, { type: 'draft', xml, draft: r.draft, by: author.name, label, source: via === 'claude' ? 'mcp' : 'web' }, { exceptHolder: holder });
+    return r.draft;
+  });
+
+  for (const [path, delta] of [['undo', -1], ['redo', 1]]) {
+    app.post(`/api/diagrams/:id/${path}`, async (req, reply) => {
+      const u = requireUser(req, reply); if (!u) return;
+      const d = db.getDiagram(req.params.id);
+      if (!d) return fail(reply, 404, 'Diagramme introuvable.');
+      if (lockedByOther(d, u)) return fail(reply, 423, `${d.lock.author} modifie ce diagramme.`, { lock: d.lock });
+      const r = await diagrams.step(d.id, delta);
+      if (!r) return fail(reply, 409, delta < 0 ? 'Rien à annuler.' : 'Rien à rétablir.');
+      const label = `${delta < 0 ? 'Annulé' : 'Rétabli'} : ${r.step?.label || 'modification'}`;
+      hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, by: u.name, label, source: 'web' }, { exceptHolder: req.body?.holder });
+      return { xml: r.xml, draft: r.draft, label };
+    });
+  }
+
+  app.post('/api/diagrams/:id/commit', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    const d = db.getDiagram(req.params.id);
+    if (!d) return fail(reply, 404, 'Diagramme introuvable.');
+    if (lockedByOther(d, u)) return fail(reply, 423, `${d.lock.author} modifie ce diagramme.`, { lock: d.lock });
     try {
-      const r = await diagrams.save(req.params.id, { xml, baseRev, holder, user: u, message: str(message, 300) ? message.trim() : null });
-      if (r.status === 404) return fail(reply, 404, 'Diagramme introuvable.');
-      if (r.status === 423) return fail(reply, 423, r.lock ? `${r.lock.author} modifie ce diagramme.` : 'Reprenez la main (bouton « Modifier ») avant d\'enregistrer.', { lock: r.lock });
-      if (r.status === 409) return fail(reply, 409, 'Le diagramme a été modifié entre-temps.', { current: r.current });
+      const r = await diagrams.commit(d.id, { user: u, message: str(req.body?.message, 300) ? req.body.message.trim() : null });
+      if (r.status === 204) return fail(reply, 409, 'Rien à enregistrer : le brouillon est identique à la dernière version.');
+      hub.broadcast(d.id, { type: 'commit', rev: r.diagram.rev, version: r.diagram.version, by: u.name, message: req.body?.message });
       return r.diagram;
     } catch (e) { return gitFail(reply, e); }
+  });
+
+  app.post('/api/diagrams/:id/restore', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    const d = db.getDiagram(req.params.id);
+    if (!d) return fail(reply, 404, 'Diagramme introuvable.');
+    if (!holdsLock(d, req.body?.holder)) return fail(reply, 423, 'Reprenez la main (bouton « Modifier »).', { lock: d.lock });
+    const r = await diagrams.restore(d.id, String(req.body?.sha || ''), u);
+    if (!r) return fail(reply, 404, 'Version introuvable.');
+    hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, by: u.name, label: `Retour à la version ${r.version.version}`, source: 'web' }, { exceptHolder: req.body.holder });
+    return { xml: r.xml, draft: r.draft, version: r.version };
+  });
+
+  // ---------- temps réel ----------
+  app.get('/api/ws', { websocket: true }, (socket, req) => {
+    const u = auth.currentUser(req);
+    if (!u) { socket.close(4401, 'Connexion requise'); return; }
+    hub.attach(socket, u);
+  });
+
+  // ---------- connecteur MCP (Claude) ----------
+  app.post('/mcp', { config: { rateLimit: { max: 300, timeWindow: '1 minute' } } }, async (req, reply) => {
+    const u = oauth.bearerUser(req);
+    if (!u) return oauth.challenge(req, reply);
+    await mcp.handle(req, reply, u, oauth.base(req));
+  });
+  app.get('/mcp', async (req, reply) => {
+    if (!oauth.bearerUser(req)) return oauth.challenge(req, reply);
+    return reply.code(405).header('allow', 'POST').send({ error: 'Utilisez POST (transport HTTP sans état).' });
+  });
+  app.delete('/mcp', async (req, reply) => reply.code(405).header('allow', 'POST').send());
+
+  app.get('/api/me/connections', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    return { mcpUrl: `${oauth.base(req)}/mcp`, grants: db.grants(u.id) };
+  });
+  app.delete('/api/me/connections/:clientId', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    if (!db.revokeGrant(u.id, req.params.clientId)) return fail(reply, 404, 'Connexion introuvable.');
+    return { ok: true };
   });
 
   // ---------- verrou d'édition ----------
@@ -316,7 +393,8 @@ export async function buildApp(config) {
     });
   }
 
-  app.addHook('onClose', async () => { clearInterval(syncTimer); db.raw.close(); });
+  app.addHook('onClose', async () => { clearInterval(syncTimer); hub.close(); db.raw.close(); });
   app.decorate('git', git);
+  app.decorate('hub', hub);
   return app;
 }

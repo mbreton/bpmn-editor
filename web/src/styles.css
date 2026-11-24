@@ -349,3 +349,13 @@ textarea.field { resize: vertical; line-height: 1.45; }
 
 .djs-element.sim-scope .djs-visual > rect { stroke: #2f6fd6 !important; stroke-width: 2px !important; }
 .djs-element.sim-scope-active .djs-visual > rect { stroke: var(--acc) !important; stroke-width: 2.5px !important; }
+
+/* présence, connecteur Claude */
+.presence { font-size: 12px; color: var(--muted, #667); margin-left: 8px; white-space: nowrap; }
+.connect-box { margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line, #e3e5ea); display: grid; gap: 8px; }
+.connect-box h3 { margin: 0; font-size: 15px; }
+.connect-box h4 { margin: 6px 0 0; font-size: 13px; }
+.connect-box .row { display: flex; gap: 8px; }
+.connect-box .row .field { flex: 1; font-size: 12px; }
+.grants { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.grants li { display: flex; justify-content: space-between; align-items: center; gap: 8px; }

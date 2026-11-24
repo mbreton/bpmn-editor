@@ -22,7 +22,11 @@ async function route() {
   if (closeCurrent) { const c = closeCurrent; closeCurrent = null; await c(); }
   cfg = await api.config().catch(() => ({ user: null, ai: null, git: {} }));
   const path = location.pathname;
-  if (!cfg.user) return renderAuth(path);
+  // retour vers l'autorisation OAuth (connecteur Claude) après connexion
+  const oauthNext = new URLSearchParams(location.search).get('next');
+  const safeNext = oauthNext && /^\/oauth\/authorize\?/.test(oauthNext) ? oauthNext : null;
+  if (!cfg.user) return renderAuth(safeNext || path);
+  if (safeNext) { location.href = safeNext; return; }
   let m;
   if ((m = /^\/d\/([\w-]+)\/?$/.exec(path))) {
     closeCurrent = await openEditor(app, { id: m[1], user: cfg.user, cfg, onBack: () => navigate('/') });
@@ -82,6 +86,7 @@ function renderAuth(nextPath) {
       await api.login(email, pw);
       const after = await api.config();
       if (!after.user) { $('#err').textContent = 'Connexion acceptée, mais le navigateur n\'a pas conservé la session. Vérifiez que COOKIE_SECURE n\'est pas forcé à true alors que le site est en HTTP.'; return; }
+      if (next.startsWith('/oauth/')) { location.href = next; return; }
       navigate(next, true);
     } catch (err) {
       $('#err').textContent = err.status === 429 ? 'Trop de tentatives, réessayez dans quelques minutes.' : err.message;
@@ -116,6 +121,29 @@ async function accountDialog() {
     <div class="fld"><label class="lbl" for="meNew">Nouveau mot de passe</label><input class="field" id="meNew" type="password" autocomplete="new-password"></div>
   </div>`);
   body.querySelector('#meName').value = cfg.user.name;
+  const conn = h(`<section class="connect-box">
+    <h3>Connecter Claude</h3>
+    <p class="muted small">Ajoutez cet éditeur comme connecteur dans Claude (Paramètres → Connecteurs → Ajouter un connecteur personnalisé) : Claude pourra lire vos diagrammes, les modifier en direct sous vos yeux, zoomer sur ce dont il parle et enregistrer des versions à votre demande.</p>
+    <div class="row"><input class="field mono" id="mcpUrl" readonly><button class="btn" id="mcpCopy" type="button">Copier</button></div>
+    <p class="muted small" id="mcpWarn" hidden>⚠ Le site est servi en HTTP : Claude exige une adresse HTTPS pour les connecteurs.</p>
+    <h4>Applications connectées</h4><ul class="grants"><li class="muted small">Chargement…</li></ul>
+  </section>`);
+  body.append(conn);
+  const loadConnections = async () => {
+    try {
+      const c = await api.connections();
+      conn.querySelector('#mcpUrl').value = c.mcpUrl;
+      conn.querySelector('#mcpWarn').hidden = c.mcpUrl.startsWith('https:');
+      const ul = conn.querySelector('.grants');
+      ul.innerHTML = c.grants.map(g => `<li><span><b>${esc(g.name)}</b> <span class="muted small">autorisée le ${esc(fmtDate(g.since))}${g.lastUsed ? ` · utilisé ${esc(fmtDate(g.lastUsed))}` : ''}</span></span> <button class="btn small danger" type="button" data-c="${esc(g.clientId)}">Révoquer</button></li>`).join('') || '<li class="muted small">Aucune.</li>';
+    } catch (e) { conn.querySelector('.grants').innerHTML = `<li class="error small">${esc(e.message)}</li>`; }
+  };
+  conn.addEventListener('click', async e => {
+    if (e.target.id === 'mcpCopy') { conn.querySelector('#mcpUrl').select(); try { await navigator.clipboard.writeText(conn.querySelector('#mcpUrl').value); toast('Adresse copiée.'); } catch { document.execCommand('copy'); } }
+    const c = e.target.dataset.c;
+    if (c) { await api.revokeConnection(c); toast('Accès révoqué.'); loadConnections(); }
+  });
+  loadConnections();
   const ok = await dialog({ title: 'Mon compte', body, buttons: [{ label: 'Annuler', value: false }, { label: 'Enregistrer', value: true, primary: true }] });
   if (!ok) return;
   const fields = {};
@@ -131,7 +159,7 @@ async function accountDialog() {
 async function renderLibrary() {
   document.title = 'Diagrammes · Éditeur BPMN';
   app.innerHTML = `<div class="lib">
-    ${header('Diagrammes', `Chaque enregistrement est un commit Git signé par son auteur${cfg.git?.remote ? ', poussé vers le dépôt distant' : ''}. Pour partager un diagramme, copiez simplement l'adresse de sa page.`)}
+    ${header('Diagrammes', `Les modifications sont sauvegardées en continu ; « Enregistrer une version » crée un commit Git signé par son auteur${cfg.git?.remote ? ', poussé vers le dépôt distant' : ''}. Pour partager un diagramme, copiez simplement l'adresse de sa page.`)}
     <div class="row lib-actions">
       <button class="btn primary" id="new">Nouveau diagramme</button>
       <label class="btn" for="imp">Importer un .bpmn</label><input type="file" id="imp" accept=".bpmn,.xml" hidden>

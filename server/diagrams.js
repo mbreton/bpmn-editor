@@ -26,11 +26,62 @@ export function createDiagrams({ db, git }) {
   return {
     list: () => db.listDiagrams(),
 
+    /** Diagramme avec son brouillon : `xml` est l'état de travail courant, `committedXml` la dernière version Git. */
     async get(id) {
       const d = db.getDiagram(id);
       if (!d) return null;
-      const [xml, history] = await Promise.all([git.read(d.path), git.history(d.path)]);
-      return { ...d, xml, rev: history[0]?.sha || null, version: history.length };
+      const [committedXml, history] = await Promise.all([git.read(d.path), git.history(d.path)]);
+      const draftXml = db.draftXml(id);
+      const info = db.draftInfo(id);
+      return {
+        ...d, xml: draftXml ?? committedXml, committedXml, rev: history[0]?.sha || null, version: history.length,
+        draft: { ...(info || { seq: 0, canUndo: false, canRedo: false }), dirty: draftXml !== null && draftXml !== committedXml }
+      };
+    },
+
+    /** Enregistre une étape du brouillon (sauvegarde continue, sans commit). */
+    async writeDraft(id, { xml, user, label, source }) {
+      const d = db.getDiagram(id);
+      if (!d) return null;
+      const baseXml = db.draftXml(id) === null ? await git.read(d.path) : null;
+      const r = db.pushStep(id, { xml, author: user.name, label, source, baseXml });
+      db.touchDiagram(id, { updatedBy: user.name });
+      return { ...r, draft: await this.draftState(id) };
+    },
+
+    async draftState(id) {
+      const d = db.getDiagram(id);
+      const info = db.draftInfo(id) || { seq: 0, canUndo: false, canRedo: false };
+      const xml = db.draftXml(id);
+      return { ...info, dirty: xml !== null && xml !== await git.read(d.path) };
+    },
+
+    /** Annuler (-1) ou rétablir (+1) une étape du brouillon. */
+    async step(id, delta) {
+      const r = db.moveStep(id, delta);
+      if (!r) return null;
+      return { ...r, xml: db.draftXml(id), draft: await this.draftState(id) };
+    },
+
+    /** Crée une version Git à partir du brouillon courant. */
+    async commit(id, { user, message }) {
+      const d = db.getDiagram(id);
+      if (!d) return { status: 404 };
+      const xml = db.draftXml(id);
+      if (xml === null || xml === await git.read(d.path)) return { status: 204 };
+      await git.write(d.path, xml, { author: authorOf(user), message: message || `Modification de ${d.name}` });
+      db.touchDiagram(id, { updatedBy: user.name });
+      return { status: 200, diagram: await this.get(id) };
+    },
+
+    /** Remet une ancienne version dans le brouillon (annulable). */
+    async restore(id, sha, user) {
+      const versions = await this.history(id);
+      const v = versions?.find(x => x.sha.startsWith(sha));
+      if (!v) return null;
+      const xml = await this.version(id, v.sha);
+      const r = await this.writeDraft(id, { xml, user, label: `Retour à la version ${v.version}`, source: 'restore' });
+      return { ...r, xml, version: v };
     },
 
     async create({ name, xml, user }) {
@@ -39,24 +90,6 @@ export function createDiagrams({ db, git }) {
       const sha = await git.write(path, content, { author: authorOf(user), message: xml ? `Import : ${name}` : `Création : ${name}` });
       const d = db.insertDiagram({ name, path, updatedBy: user.name });
       return { ...d, rev: sha, version: 1 };
-    },
-
-    /**
-     * Enregistre une version. Exige le verrou (holder) et la révision de départ (baseRev) :
-     * 423 si quelqu'un d'autre modifie, 409 si le fichier a changé entre-temps.
-     */
-    async save(id, { xml, baseRev, holder, user, message }) {
-      const d = db.getDiagram(id);
-      if (!d) return { status: 404 };
-      if (!d.lock || d.lock.holder !== holder) return { status: 423, lock: d.lock };
-      const head = await git.head(d.path);
-      if (head !== baseRev) {
-        const h = (await git.history(d.path))[0];
-        return { status: 409, current: { rev: head, version: h?.version, updatedBy: h?.author, updatedAt: h?.createdAt } };
-      }
-      const sha = await git.write(d.path, xml, { author: authorOf(user), message: message || `Modification de ${d.name}` });
-      db.touchDiagram(id, { updatedBy: user.name });
-      return { status: 200, diagram: await this.get(id), changed: !!sha };
     },
 
     async rename(id, name, user) {

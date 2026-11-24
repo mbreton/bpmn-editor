@@ -2,7 +2,7 @@
 // On en choisit une, on peut revenir en arrière pour essayer les autres, et demander à l'IA
 // quand le diagramme ne propose pas ce qu'on attendait.
 import { h, esc } from './dom.js';
-import { createWalker } from './pathwalker.js';
+import { createWalker } from '../../shared/pathwalker.js';
 import { createFocus } from './focus.js';
 
 export function createExplorer(ctx, { button, bar }) {
@@ -196,5 +196,17 @@ export function createExplorer(ctx, { button, bar }) {
   ctx.on('editing', () => { if (walker) close(); });
   ctx.on('mode', m => { if (walker && m === 'review') close(); });
 
-  return { destroy() { document.removeEventListener('keydown', onKey); } };
+  /** Rejoue un parcours (exploration menée par Claude via le connecteur). */
+  function replay(choices) {
+    if (ctx.previewing) return;
+    if (!walker) open();
+    let state = walker.reset();
+    try { for (const c of choices) state = walker.choose(c); }
+    catch { state = walker.current(); }
+    render(state);
+    const at = state.tokens.map(t => t.at);
+    if (at.length) keepInView(at);
+  }
+
+  return { replay, destroy() { document.removeEventListener('keydown', onKey); } };
 }

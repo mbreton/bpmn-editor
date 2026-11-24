@@ -5,6 +5,7 @@ COPY package.json package-lock.json ./
 RUN npm ci
 COPY vite.config.js ./
 COPY web ./web
+COPY shared ./shared
 RUN npm run build && npm prune --omit=dev
 
 # ---- exécution ----
@@ -19,6 +20,7 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 COPY server ./server
+COPY shared ./shared
 RUN mkdir -p /data && chown node:node /data
 USER node
 VOLUME ["/data"]

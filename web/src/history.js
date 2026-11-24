@@ -8,7 +8,7 @@ export function createHistory(ctx, host) {
   let items = [];
 
   const el = h(`<div class="props">
-    <p class="muted small">Chaque enregistrement est un commit Git signé par son auteur. Cliquez sur une version pour l'afficher sur le diagramme, puis restaurez-la si besoin.</p>
+    <p class="muted small">Chaque version enregistrée est un commit Git signé par son auteur. Cliquez sur une version pour l'afficher sur le diagramme, puis remettez-la dans le brouillon si besoin.</p>
     <ol class="versions"><li class="muted">Chargement…</li></ol>
   </div>`);
   host.append(el);
@@ -46,19 +46,21 @@ export function createHistory(ctx, host) {
     const banner = h(`<div class="banner-in">
       <div><b>Version ${v.version}</b> <span class="muted small">${esc(fmtDate(v.createdAt))} · ${esc(v.author)}${v.message ? ' · ' + esc(v.message) : ''}</span></div>
       <div class="row">
-        <button class="btn" data-a="close">Revenir à la version de travail</button>
-        <button class="btn primary" data-a="restore" ${ctx.editing ? '' : 'disabled title="Passez en mode édition pour restaurer"'}>Restaurer cette version</button>
+        <button class="btn" data-a="close">Revenir au brouillon</button>
+        <button class="btn primary" data-a="restore" ${ctx.editing ? '' : 'disabled title="Passez en mode édition pour restaurer"'}>Remettre cette version</button>
       </div></div>`);
     banner.querySelector('[data-a=close]').addEventListener('click', close);
-    banner.querySelector('[data-a=restore]').addEventListener('click', () => {
-      ctx.hideBanner();
-      ctx.previewing = false;
-      viewing = null; savedXml = null;
-      ctx.applyLock();
-      ctx.markDirty(`Restauration de la version ${v.version} (${sha.slice(0, 7)})`);
-      ctx.emit('mode', 'edit');
-      toast(`Version ${v.version} restaurée : enregistrez pour la publier.`);
-      load();
+    banner.querySelector('[data-a=restore]').addEventListener('click', async () => {
+      try {
+        const r = await api.restore(ctx.id, sha, ctx.holder);
+        ctx.hideBanner();
+        ctx.previewing = false;
+        viewing = null; savedXml = null;
+        await ctx.loadDraft(r.xml, r.draft);
+        ctx.emit('mode', 'edit');
+        toast(`Version ${v.version} remise dans le brouillon (↶ pour annuler).`);
+        load();
+      } catch (e) { toast(e.message, 'error'); }
     });
     ctx.showBanner(banner);
     load();
