@@ -17,6 +17,7 @@ Operations (use existing ids from the diagram; give new elements a readable uniq
 - {"op":"connect","ref":"<newFlowId>","from":"<id>","to":"<id>","name":"…","condition":"\${…}"}
 - {"op":"replace","id":"<id>","type":"bpmn:ServiceTask"}                             (change element type, keeps connections; for events also "event")
 - {"op":"delete","id":"<id>"}
+- {"op":"move","id":"<id>","next_to":"<otherId>","side":"right|left|below|above","gap":50}   (or "x","y" = new centre, or "dx","dy"; connected flows follow; if the spot is taken the element slides to the nearest free spot unless "avoid_overlap":false)
 - {"op":"set_timer","id":"<eventId>","kind":"timeDuration|timeDate|timeCycle","value":"P3D"}
 - {"op":"set_interrupting","id":"<boundaryOrEventSubprocessStartId>","value":false}
 - {"op":"set_condition","id":"<sequenceFlowId>","expression":"\${montant > 1000}"}

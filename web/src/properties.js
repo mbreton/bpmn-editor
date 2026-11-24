@@ -54,8 +54,7 @@ export function createProperties(ctx, host) {
       <h3 class="props-title">${esc(bo?.name || 'Processus')}</h3>
       <p class="muted small">${esc(typeLabel(root))} · cliquez sur un élément pour voir et modifier ses propriétés.</p>
       ${is(root, 'bpmn:Process') ? '<div class="fld"><label class="lbl" for="pname">Nom du processus</label><input class="field" id="pname"></div>' : ''}
-      <h4>Cohérence du workflow${ctx.check ? ` <span class="muted small">· contrôlé en ${ctx.check.ms} ms</span>` : ''}</h4>
-      <ul class="issues"></ul>
+      <div class="check-summary"></div>
       <h4>Raccourcis</h4>
       <ul class="tips">
         <li>Double-clic sur un élément : le renommer.</li>
@@ -70,15 +69,11 @@ export function createProperties(ctx, host) {
       pname.disabled = !editable();
       pname.addEventListener('change', () => modeling.updateProperties(root, { name: pname.value.trim() || undefined }));
     }
-    const ul = el.querySelector('.issues');
-    if (!issues.length) ul.append(h('<li class="ok">Aucun problème détecté.</li>'));
-    for (const i of issues) {
-      const li = h(`<li class="${i.level}"><button class="linklike"></button><span></span></li>`);
-      li.querySelector('button').textContent = i.name;
-      li.querySelector('span').textContent = ' — ' + i.text;
-      li.querySelector('button').addEventListener('click', () => focusElement(i.id));
-      ul.append(li);
-    }
+    const cs = el.querySelector('.check-summary');
+    const err = issues.filter(i => i.level === 'err').length, warn = issues.filter(i => i.level === 'warn').length;
+    cs.className = `check-summary ${err ? 'err' : warn ? 'warn' : 'ok'}`;
+    cs.append(err || warn ? `Contrôles : ${err ? `${err} bloquant${err > 1 ? 's' : ''}` : ''}${err && warn ? ', ' : ''}${warn ? `${warn} à vérifier` : ''}. ` : '✓ Contrôles : le workflow est cohérent. ');
+    if (err || warn) { const b = h('<button class="linklike" type="button">Voir le détail</button>'); b.addEventListener('click', () => ctx.selectTab('checks')); cs.append(b); }
     return el;
   }
 
@@ -118,6 +113,17 @@ export function createProperties(ctx, host) {
       const more = h('<button class="linklike small" type="button">En savoir plus dans l\'aide</button>');
       more.addEventListener('click', () => ctx.showHelp?.(entry.id));
       ex.append(more);
+    }
+    const mine = lint().filter(i => i.id === bo.id && i.level !== 'info');
+    if (mine.length) {
+      const box = h('<div class="el-issues"></div>');
+      for (const i of mine) {
+        const p = h(`<div class="el-issue ${i.level}"><p class="ck-problem"></p></div>`);
+        p.querySelector('.ck-problem').textContent = `${i.level === 'err' ? '✕ Bloquant' : '⚠ À vérifier'} : ${i.text}`;
+        if (i.fix) { const f = h('<p class="ck-fix"><b>Comment corriger :</b> <span></span></p>'); f.querySelector('span').textContent = i.fix; p.append(f); }
+        box.append(p);
+      }
+      el.querySelector('.type-line').after(box);
     }
     const tags = el.querySelector('.tags');
     const tag = (text, kind = '') => tags.append(Object.assign(h(`<span class="tag ${kind}"></span>`), { textContent: text }));
@@ -388,7 +394,8 @@ export function createProperties(ctx, host) {
   });
   modeler.on('import.done', () => { current = null; render(); });
   ctx.on('editing', render);
-  ctx.on('check', () => { if (!modeler.get('selection').get().length) render(); });
+  // nouveau contrôle : on rafraîchit, sauf pendant une saisie dans le panneau (pour ne pas perdre le curseur)
+  ctx.on('check', () => { if (!host.contains(document.activeElement) || document.activeElement === document.body) render(); });
   ctx.on('mode', render);
   render();
 

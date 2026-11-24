@@ -5,6 +5,8 @@ import { layoutProcess } from 'bpmn-auto-layout';
 import { BpmnModdle } from 'bpmn-moddle';
 
 const moddle = new BpmnModdle();
+// propriétés de disposition recalculées par la bibliothèque : on ne recopie pas celles d'origine
+const KEEP_LAYOUT = new Set(['id', 'bounds', 'bpmnElement', 'label', 'waypoint', 'isExpanded', 'isHorizontal', 'isMarkerVisible', 'sourceElement', 'targetElement', 'messageVisibleKind']);
 const overlaps = (a, b, m = 15) => a.x < b.x + b.width + m && b.x < a.x + a.width + m && a.y < b.y + b.height + m && b.y < a.y + a.height + m;
 const inside = (a, c) => a.x >= c.x + 10 && a.y >= c.y + 25 && a.x + a.width <= c.x + c.width - 10 && a.y + a.height <= c.y + c.height - 10;
 
@@ -12,7 +14,17 @@ export async function relayout(xml) {
   const t0 = performance.now();
   const { rootElement: before } = await moddle.fromXML(xml, 'bpmn:Definitions');
   const hadDi = new Set();
-  for (const d of before.diagrams || []) for (const pe of d.plane?.planeElement || []) if (pe.bpmnElement) hadDi.add(pe.bpmnElement.id);
+  const styles = new Map(); // couleurs (bioc:*, color:*) et autres attributs d'extension, par élément
+  for (const d of before.diagrams || []) for (const pe of d.plane?.planeElement || []) {
+    if (!pe.bpmnElement) continue;
+    hadDi.add(pe.bpmnElement.id);
+    // bpmn-moddle connaît bioc:* et color:* (propriétés fill, stroke, background-color…) ; le reste est dans $attrs
+    const ext = [
+      ...Object.keys(pe).filter(k => !k.startsWith('$') && !KEEP_LAYOUT.has(k)).map(k => ['prop', k, pe.get(k)]),
+      ...Object.entries(pe.$attrs || {}).filter(([k]) => !k.startsWith('xmlns')).map(([k, v]) => ['attr', k, v])
+    ];
+    if (ext.length) styles.set(pe.bpmnElement.id, ext);
+  }
 
   const out = await layoutProcess(xml);
   const { rootElement: defs, elementsById } = await moddle.fromXML(out.xml, 'bpmn:Definitions');
@@ -99,7 +111,17 @@ export async function relayout(xml) {
     edgesAdded++;
   }
 
+  // 4. styles d'origine : la bibliothèque recrée la disposition sans les couleurs
+  let styled = 0;
+  for (const p of planes) for (const pe of p.planeElement || []) {
+    const ext = styles.get(pe.bpmnElement?.id);
+    if (!ext) continue;
+    for (const [kind, k, v] of ext) { if (kind === 'prop') pe.set(k, v); else pe.$attrs[k] = v; }
+    styled++;
+  }
+  for (const [k, v] of Object.entries(before.$attrs || {})) if (k.startsWith('xmlns:') && !(k in defs.$attrs)) defs.$attrs[k] = v;
+
   const { xml: result } = await moddle.toXML(defs, { format: true });
   const warnings = (out.warnings || []).filter(w => !(w.code === 'DI_NOT_CREATED' && drawn.has(w.elementId)) && !(edgesAdded && w.code === 'DI_NOT_CREATED' && elementsById[w.elementId]?.$instanceOf?.('bpmn:Association')));
-  return { xml: result, warnings: warnings.map(w => `${w.code}${w.elementId ? ` (${w.elementId})` : ''}`), labelsFixed, edgesAdded, moved, ms: Math.round(performance.now() - t0) };
+  return { xml: result, warnings: warnings.map(w => `${w.code}${w.elementId ? ` (${w.elementId})` : ''}`), labelsFixed, edgesAdded, moved, styled, ms: Math.round(performance.now() - t0) };
 }

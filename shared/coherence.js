@@ -17,6 +17,21 @@ const REF_KINDS = {
 const CRON = /^(\S+\s+){4,6}\S+$/;
 const LEVEL_ORDER = { error: 0, warn: 1, info: 2 };
 
+/** Comment corriger, par type de problème (affiché sous le problème, et renvoyé à Claude). */
+export const FIXES = {
+  'flow-ends': 'Supprimez ce flux et retracez-le entre les deux bons éléments.',
+  unreachable: 'Tracez une flèche depuis l\'étape qui doit le précéder (survolez-la puis glissez la flèche de sa barre d\'outils), ou supprimez-le s\'il ne sert plus.',
+  'implicit-end': 'Indiquez ce qui se passe ensuite : reliez-le à l\'étape suivante, ou ajoutez un événement de fin (cercle épais) pour dire que le parcours se termine là.',
+  conditions: 'Cliquez sur chaque flèche qui sort de la passerelle et saisissez sa condition, ou cochez « flux par défaut » sur celle à suivre quand aucune condition n\'est vraie.',
+  'default-flow': 'Choisissez à nouveau le flux par défaut parmi les flèches qui sortent de cette passerelle.',
+  'event-gateway': 'Après une passerelle basée sur les événements, chaque flèche doit mener à une attente (délai, message, signal…) : remplacez la cible par un événement intermédiaire d\'attente.',
+  boundary: 'Posez l\'événement sur le bord d\'une tâche ou d\'un sous-processus et donnez-lui un déclencheur (délai, erreur, message…).',
+  timer: 'Dans le champ Délai : une durée (P15D = 15 jours, PT4H = 4 heures), une date (2026-12-01T09:00:00Z) ou un cycle (R3/P1D = 3 fois, tous les jours).',
+  refs: 'Facultatif : donnez un nom au message / à l\'erreur dans les propriétés, pour savoir précisément lequel est attendu.',
+  conditional: 'Saisissez la condition qui déclenche l\'événement.',
+  start: 'Ajoutez un événement de début (cercle fin) au point de départ du processus.'
+};
+
 /** Délai lisible ? Renvoie un message d'erreur, ou null si correct. */
 export function timerProblem(kind, raw) {
   const v = String(raw || '').trim();
@@ -31,7 +46,7 @@ export function timerProblem(kind, raw) {
 
 export function checkCoherence(definitions) {
   const out = [];
-  const add = (bo, level, text, rule) => out.push({ id: bo?.id, name: nameOf(bo), level, text, rule });
+  const add = (bo, level, text, rule) => out.push({ id: bo?.id, name: nameOf(bo), level, text, rule, fix: FIXES[rule] || '' });
   const processes = (definitions.rootElements || []).filter(r => is(r, 'bpmn:Process'));
 
   const walk = container => {
@@ -105,4 +120,4 @@ export function newErrors(before, after) {
   return after.filter(i => i.level === 'error' && !had.has(key(i)));
 }
 
-export const formatIssue = i => `[${i.id}] ${i.name} : ${i.text}`;
+export const formatIssue = i => `[${i.id}] ${i.name} : ${i.text}${i.fix ? ` → ${i.fix}` : ''}`;

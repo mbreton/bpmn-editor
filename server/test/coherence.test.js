@@ -54,3 +54,13 @@ test('réorganisation : rien de perdu, libellés et compensation retouchés', as
   for (const id of ['Task_KYC', 'Timer_Relance', 'Sub_Dossier', 'Err_Boundary', 'Comp_Reserver', 'Assoc_Comp']) assert.match(r.xml, new RegExp(`bpmnElement="${id}"`), `${id} dessiné`);
   assert.ok(!c.issues.some(i => i.rule === 'no-overlapping-elements'), JSON.stringify(c.issues.filter(i => i.rule === 'no-overlapping-elements')));
 });
+
+test('réorganisation : les couleurs sont conservées', async () => {
+  const colored = onboarding.replace(/(<bpmndi:BPMNShape id="[^"]*" bpmnElement="Task_KYC")/, '$1 bioc:stroke="#205022" bioc:fill="#c8e6c9" color:background-color="#c8e6c9"')
+    .replace('<bpmn:definitions ', '<bpmn:definitions xmlns:bioc="http://bpmn.io/schema/bpmn/biocolor/1.0" xmlns:color="http://www.omg.org/spec/BPMN/non-normative/color/1.0" ');
+  assert.match(colored, /bioc:fill="#c8e6c9"/);
+  const r = await relayout(colored);
+  assert.match(r.xml, /bpmnElement="Task_KYC"[^>]*bioc:fill="#c8e6c9"|bioc:fill="#c8e6c9"[^>]*bpmnElement="Task_KYC"/);
+  assert.match(r.xml, /xmlns:bioc="http:\/\/bpmn.io\/schema\/bpmn\/biocolor\/1.0"/);
+  assert.equal(r.styled, 1);
+});

@@ -13,6 +13,7 @@ import { createAssistant } from './assistant.js';
 import { createHelp } from './help.js';
 import { createExplorer } from './explorer.js';
 import { createHistory } from './history.js';
+import { createChecks } from './checks.js';
 import { createApplier } from './aiops.js';
 import { createFocus } from './focus.js';
 import { connectLive } from './live.js';
@@ -56,13 +57,13 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
         <span class="grp edit-only">
           <button class="btn icon ghost" id="undo" title="Annuler la dernière modification, y compris celles de Claude" aria-label="Annuler">↶</button>
           <button class="btn icon ghost" id="redo" title="Rétablir" aria-label="Rétablir">↷</button>
-          <button class="btn ghost" id="layout" title="Recalculer automatiquement la disposition (annulable avec ↶)">Réorganiser</button>
+          <button class="btn ghost" id="layout" title="Réorganiser : recalculer automatiquement la disposition (annulable avec ↶)" aria-label="Réorganiser"><span class="ic">⊞</span><span class="bl">Réorganiser</span></button>
         </span>
         <button class="btn primary" id="edit">Modifier</button>
-        <button class="btn primary" id="save" title="Créer une version (commit Git) à partir du brouillon">Enregistrer une version</button>
+        <button class="btn primary" id="save" title="Enregistrer une version : commit Git à partir du brouillon (Ctrl+S)"><span class="bl-long">Enregistrer une version</span><span class="bl-short">Enregistrer</span></button>
         <button class="btn edit-only" id="done">Terminer</button>
-        <button class="btn" id="sim" aria-pressed="false" title="Parcourir le processus étape par étape et voir toutes les suites possibles">Explorer les parcours</button>
-        <div class="menu-wrap"><button class="btn" id="exp" aria-haspopup="true">Exporter</button>
+        <button class="btn" id="sim" aria-pressed="false" aria-label="Explorer les parcours" title="Explorer les parcours : le processus étape par étape, avec toutes les suites possibles"><span class="ic">▶</span><span class="bl">Explorer les parcours</span></button>
+        <div class="menu-wrap"><button class="btn" id="exp" aria-haspopup="true" aria-label="Exporter" title="Exporter ou copier le lien"><span class="ic">⇩</span><span class="bl">Exporter</span></button>
           <div class="menu" id="expMenu" hidden>
             <button data-x="link">Copier le lien de la page</button>
             <button data-x="bpmn">Fichier .bpmn</button><button data-x="svg">Image SVG</button><button data-x="png">Image PNG</button>
@@ -80,11 +81,13 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       <aside class="ed-side" id="side">
         <nav class="tabs" role="tablist">
           <button role="tab" data-tab="props" aria-selected="true">Propriétés</button>
-          <button role="tab" data-tab="ai">Assistant IA</button>
+          <button role="tab" data-tab="checks">Contrôles</button>
+          <button role="tab" data-tab="ai" title="Assistant IA intégré"${cfg.ai ? '' : ' hidden'}>Assistant</button>
           <button role="tab" data-tab="help">Aide</button>
           <button role="tab" data-tab="history">Historique</button>
         </nav>
         <section class="tab-body" data-panel="props"></section>
+        <section class="tab-body" data-panel="checks" hidden></section>
         <section class="tab-body" data-panel="ai" hidden></section>
         <section class="tab-body" data-panel="help" hidden></section>
         <section class="tab-body" data-panel="history" hidden></section>
@@ -198,17 +201,19 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     document.title = `${ctx.name} · Éditeur BPMN`;
     const st = $('#status', root);
     const otherHolder = lock && lock.holder !== holder;
+    const setPill = (main, extra) => { st.innerHTML = ''; st.append(main); if (extra) { const x = document.createElement('span'); x.className = 'pill-extra'; x.textContent = `\u00a0· ${extra}`; st.append(x); } st.title = `${main}${extra ? ` · ${extra}` : ''}${st.dataset.note ? `\n${st.dataset.note}` : ''}`; };
     const draftNote = draft?.dirty ? `brouillon · ${draft.updatedBy ? `${draft.updatedBy}, ` : ''}${fmtTime(draft.updatedAt)}` : `v${ctx.version}`;
-    st.title = draft?.dirty ? `Modifié depuis la version ${ctx.version}. Tout est sauvegardé ; « Enregistrer une version » crée un commit Git.` : `Identique à la version ${ctx.version}`;
+    st.dataset.note = draft?.dirty ? `Modifié depuis la version ${ctx.version}. Tout est sauvegardé ; « Enregistrer une version » crée un commit Git.` : `Identique à la version ${ctx.version}`;
     if (ctx.editing) {
       st.className = 'pill ok';
-      st.textContent = `Vous modifiez · ${draftNote}`;
+      setPill('Vous modifiez', draftNote);
     } else if (otherHolder) {
       st.className = 'pill warn';
-      st.textContent = lock.userId === user.id ? `Vous modifiez dans un autre onglet` : `${lock.author || 'Quelqu\'un'} modifie depuis ${fmtTime(lock.since)}`;
+      if (lock.userId === user.id) setPill('Autre onglet', 'vous modifiez dans un autre onglet');
+      else setPill(`${lock.author || 'Quelqu\'un'} modifie`, `depuis ${fmtTime(lock.since)}`);
     } else {
       st.className = 'pill';
-      st.textContent = `Lecture · ${draftNote}`;
+      setPill('Lecture', draftNote);
     }
     edEl.classList.toggle('editing', ctx.editing);
     edEl.classList.toggle('dirty', !!draft?.dirty);
@@ -226,10 +231,14 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     const err = list.filter(i => i.level === 'error').length, warn = list.filter(i => i.level === 'warn').length;
     b.hidden = !ctx.check;
     b.className = `check-badge ${err ? 'err' : warn ? 'warn' : 'ok'}`;
-    b.textContent = err ? `✕ ${err} bloquant${err > 1 ? 's' : ''}${warn ? ` · ${warn}` : ''}` : warn ? `⚠ ${warn} à vérifier` : '✓ cohérent';
+    b.innerHTML = '';
+    const sym = err ? `✕ ${err}` : warn ? `⚠ ${warn}` : '✓';
+    const word = err ? ` bloquant${err > 1 ? 's' : ''}${warn ? ` · ${warn} à vérifier` : ''}` : warn ? ' à vérifier' : ' cohérent';
+    const w = document.createElement('span'); w.className = 'pill-extra'; w.textContent = word.replace(/^ /, '\u00a0');
+    b.append(sym, w);
     b.title = `Contrôle de cohérence du workflow (${ctx.check?.ms ?? '?'} ms). Cliquez pour le détail.`;
   }
-  $('#checkBadge', root).addEventListener('click', () => { modeler.get('selection').select([]); selectTab('props'); });
+  $('#checkBadge', root).addEventListener('click', () => selectTab('checks'));
 
   // ---------- brouillon : sauvegarde continue ----------
   modeler.on('commandStack.changed', e => {
@@ -440,6 +449,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   const explorer = createExplorer(ctx, { button: $('#sim', root), bar: $('#simBar', root) });
   const panels = [
     createProperties(ctx, $('[data-panel=props]', root)),
+    createChecks(ctx, $('[data-panel=checks]', root), { tabButton: $('[data-tab=checks]', root) }),
     createAssistant(ctx, $('[data-panel=ai]', root)),
     createHelp(ctx, $('[data-panel=help]', root)),
     createHistory(ctx, $('[data-panel=history]', root)),
@@ -453,7 +463,9 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   async function onLive(m) {
     if (m.type === 'presence') {
       const others = m.people.filter(p => p.id !== user.id).map(p => p.name);
-      $('#presence', root).textContent = others.length ? `👁 ${others.join(', ')}` : '';
+      const pr = $('#presence', root);
+      pr.textContent = others.length ? `👁 ${others.length > 1 ? others.length : others[0]}` : '';
+      pr.title = others.length ? `Ont aussi ouvert ce diagramme : ${others.join(', ')}` : '';
       return;
     }
     if (m.type === 'draft') {
@@ -497,7 +509,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     try {
       for (const c of changes) {
         const r = applier.apply(c);
-        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.added || [] });
+        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.added || [], overlaps: r.overlaps || [] });
         if (r.ok) shown.push(...(c.focus || []).map(applier.resolve), ...r.added, ...r.changed);
       }
     } finally { importing = false; }

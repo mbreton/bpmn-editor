@@ -27,7 +27,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
 
   function build(user, baseUrl) {
     const server = new McpServer({ name: 'editeur-bpmn', version }, {
-      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Chaque modification passe un contrôle de cohérence : si elle introduit un problème bloquant (condition manquante, référence cassée, délai invalide…), elle est refusée en entier avec l'explication ; corrigez et renvoyez. Les points « à vérifier » sont signalés sans bloquer. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification (et relayout si la disposition est confuse), explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
+      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Chaque modification passe un contrôle de cohérence : si elle introduit un problème bloquant (condition manquante, référence cassée, délai invalide…), elle est refusée en entier avec l'explication ; corrigez et renvoyez. Les points « à vérifier » sont signalés sans bloquer. Les éléments ajoutés sont placés à une place libre ; si apply_changes signale un chevauchement ou si le rendu est confus, corrigez localement avec l'opération move (positions via get_diagram format "layout") plutôt qu'avec relayout, qui refait toute la disposition et n'est à utiliser que si l'utilisateur le demande. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification, explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
     });
     const url = id => `${baseUrl}/d/${id}`;
 
@@ -40,6 +40,26 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
     const notOpen = d => `« ${d.name} » n'est ouvert dans aucun de vos navigateurs. Ouvrez ${url(d.id)} pour que je puisse agir à l'écran.`;
 
     async function model(xml) { return (await moddle.fromXML(xml, 'bpmn:Definitions')).rootElement; }
+
+    /** Positions : une ligne par élément dessiné, regroupées par conteneur. */
+    async function layoutText(xml) {
+      const defs = await model(xml);
+      const lines = ['Coordonnées en pixels : x, y = coin haut gauche ; l × h = taille ; centre = (x + l/2, y + h/2). L\'axe y descend.'];
+      for (const d of defs.diagrams || []) {
+        const shapes = (d.plane?.planeElement || []).filter(pe => pe.bounds && pe.bpmnElement);
+        if (!shapes.length) continue;
+        const byParent = new Map();
+        for (const pe of shapes) {
+          const el = pe.bpmnElement;
+          const parent = el.$type === 'bpmn:BoundaryEvent' ? `la bordure de ${el.attachedToRef?.id}` : el.$parent?.id || '';
+          if (!byParent.has(parent)) byParent.set(parent, []);
+          const b = pe.bounds, lb = pe.label?.bounds;
+          byParent.get(parent).push(`  [${el.id}] ${el.$type.replace('bpmn:', '')}${el.name ? ` « ${el.name.replace(/\s+/g, ' ')} »` : ''} : x=${Math.round(b.x)} y=${Math.round(b.y)} ${Math.round(b.width)}×${Math.round(b.height)}${lb ? ` · libellé x=${Math.round(lb.x)} y=${Math.round(lb.y)} ${Math.round(lb.width)}×${Math.round(lb.height)}` : ''}`);
+        }
+        for (const [parent, items] of byParent) lines.push(`Dans ${parent || 'le diagramme'} :`, ...items);
+      }
+      return lines.join('\n');
+    }
 
     server.registerTool('list_diagrams', {
       title: 'Lister les diagrammes',
@@ -56,13 +76,14 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
 
     server.registerTool('get_diagram', {
       title: 'Lire un diagramme',
-      description: 'Contenu du brouillon courant d\'un diagramme : éléments avec identifiants, types, noms, événements (délais ISO 8601, erreurs, messages), événements de bordure, flux avec conditions, sous-processus, et problèmes de cohérence détectés. format "xml" renvoie le BPMN brut.',
-      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme'), format: z.enum(['summary', 'xml']).optional() }
+      description: 'Contenu du brouillon courant d\'un diagramme : éléments avec identifiants, types, noms, événements (délais ISO 8601, erreurs, messages), événements de bordure, flux avec conditions, sous-processus, et problèmes de cohérence détectés. format "layout" donne la position et la taille de chaque élément (pour l\'opération move), "xml" le BPMN brut.',
+      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme'), format: z.enum(['summary', 'layout', 'xml']).optional() }
     }, async ({ diagram, format }) => {
       const d = find(diagram);
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
       const full = await diagrams.get(d.id);
       if (format === 'xml') return text(full.xml);
+      if (format === 'layout') return text(await layoutText(full.xml));
       const { text: body } = summarize(await model(full.xml));
       const { issues } = await checkDiagram(full.xml);
       const open = hub.openBy(d.id);
@@ -106,7 +127,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       const t0 = Date.now();
       const r = await hub.request(d.id, user.id, { type: 'apply', changes }, 30000);
       if (!r) return fail(notOpen(d));
-      const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}` : `✗ ${x.title} : ${x.error}`);
+      const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}${x.overlaps?.length ? `\n  ⚠ chevauchement à corriger (opération move) : ${x.overlaps.join(' ; ')}` : ''}` : `✗ ${x.title} : ${x.error}`);
       if (r.rejected) {
         return fail(`Rien n'a été appliqué : la modification introduit ${r.issues.length > 1 ? 'des problèmes bloquants' : 'un problème bloquant'}. Corrigez puis renvoyez l'ensemble.\n${r.issues.map(i => `- ${formatIssue(i)}`).join('\n')}${lines.length ? `\n\nDétail des opérations (annulées) :\n${lines.join('\n')}` : ''}`);
       }
@@ -139,7 +160,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
 
     server.registerTool('relayout', {
       title: 'Réorganiser la disposition',
-      description: 'Recalcule entièrement la disposition du diagramme (alignement, espacement, tracé des flux), sans rien changer au processus lui-même. Remplace la mise en page faite à la main : à proposer quand la disposition est confuse (flux qui traversent des éléments, éléments entassés), puis vérifier avec view_diagram. Annulable avec undo.',
+      description: 'Recalcule entièrement la disposition du diagramme (alignement, espacement, tracé des flux), sans rien changer au processus lui-même. Remplace toute la mise en page faite à la main : seulement si l\'utilisateur le demande ; pour un ou deux éléments mal placés, utilisez l\'opération move d\'apply_changes. Vérifiez ensuite avec view_diagram. Annulable avec undo.',
       inputSchema: { diagram: z.string() }
     }, async ({ diagram }) => {
       const d = find(diagram);
