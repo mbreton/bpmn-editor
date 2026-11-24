@@ -40,6 +40,7 @@ export const api = {
   draft: (id, body) => request('PUT', `/api/diagrams/${id}/draft`, body),
   undo: (id, holder) => request('POST', `/api/diagrams/${id}/undo`, { holder }),
   redo: (id, holder) => request('POST', `/api/diagrams/${id}/redo`, { holder }),
+  layout: (id, holder) => request('POST', `/api/diagrams/${id}/layout`, { holder }),
   commit: (id, message) => request('POST', `/api/diagrams/${id}/commit`, { message }),
   restore: (id, sha, holder) => request('POST', `/api/diagrams/${id}/restore`, { sha, holder }),
   connections: () => request('GET', '/api/me/connections'),

@@ -51,11 +51,12 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   root.innerHTML = `<div class="ed" style="--side-w:${sideW}px">
     <header class="ed-top">
       <button class="btn icon ghost" id="back" title="Retour à la liste" aria-label="Retour à la liste">←</button>
-      <div class="ed-titlebox"><h1 class="ed-title" id="title"></h1><span id="status" class="pill"></span><span id="presence" class="presence"></span></div>
+      <div class="ed-titlebox"><h1 class="ed-title" id="title"></h1><span id="status" class="pill"></span><button id="checkBadge" class="check-badge" hidden></button><span id="presence" class="presence"></span></div>
       <div class="ed-actions">
         <span class="grp edit-only">
           <button class="btn icon ghost" id="undo" title="Annuler la dernière modification, y compris celles de Claude" aria-label="Annuler">↶</button>
           <button class="btn icon ghost" id="redo" title="Rétablir" aria-label="Rétablir">↷</button>
+          <button class="btn ghost" id="layout" title="Recalculer automatiquement la disposition (annulable avec ↶)">Réorganiser</button>
         </span>
         <button class="btn primary" id="edit">Modifier</button>
         <button class="btn primary" id="save" title="Créer une version (commit Git) à partir du brouillon">Enregistrer une version</button>
@@ -122,12 +123,15 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     },
     /** Une modification faite hors de la pile de commandes (revue IA acceptée…) : sauvegarde du brouillon. */
     markDirty(label) { scheduleSave(label); },
+    check: diagram.check || null,
+    setCheck(c) { if (!c) return; ctx.check = c; refreshCheck(); ctx.emit('check', c); },
     /** Affiche un brouillon venu du serveur (annulation, restauration, autre page, Claude). */
-    async loadDraft(xml, info) {
+    async loadDraft(xml, info, check) {
       clearTimeout(saveTimer); pendingLabel = null;
       importing = true;
       try { await ctx.importXml(xml, { fit: false }); } finally { importing = false; }
       if (info) draft = info;
+      ctx.setCheck(check);
       refreshUi();
     },
     applyLock: () => applyLock(),
@@ -211,8 +215,21 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     $('#edit', root).disabled = !!(otherHolder && !isAdmin && lock.userId !== user.id);
     $('#undo', root).disabled = !draft?.canUndo || ctx.previewing;
     $('#redo', root).disabled = !draft?.canRedo || ctx.previewing;
+    $('#layout', root).disabled = ctx.previewing;
     $('#save', root).disabled = ctx.previewing || !draft?.dirty || !!(otherHolder && lock.userId !== user.id);
   }
+
+  // ---------- contrôle de cohérence (fait par le serveur à chaque sauvegarde) ----------
+  function refreshCheck() {
+    const b = $('#checkBadge', root);
+    const list = ctx.check?.issues || [];
+    const err = list.filter(i => i.level === 'error').length, warn = list.filter(i => i.level === 'warn').length;
+    b.hidden = !ctx.check;
+    b.className = `check-badge ${err ? 'err' : warn ? 'warn' : 'ok'}`;
+    b.textContent = err ? `✕ ${err} bloquant${err > 1 ? 's' : ''}${warn ? ` · ${warn}` : ''}` : warn ? `⚠ ${warn} à vérifier` : '✓ cohérent';
+    b.title = `Contrôle de cohérence du workflow (${ctx.check?.ms ?? '?'} ms). Cliquez pour le détail.`;
+  }
+  $('#checkBadge', root).addEventListener('click', () => { modeler.get('selection').select([]); selectTab('props'); });
 
   // ---------- brouillon : sauvegarde continue ----------
   modeler.on('commandStack.changed', e => {
@@ -230,13 +247,20 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     const l = label || pendingLabel || 'Modification à l\'écran';
     pendingLabel = null;
     saving = saving.then(async () => {
-      if (!ctx.editing) return;
+      if (!ctx.editing) return { ok: false };
       try {
-        draft = await api.draft(id, { xml: await ctx.getXml(), holder, label: l, via });
+        const res = await api.draft(id, { xml: await ctx.getXml(), holder, label: l, via });
+        const { check, ...info } = res;
+        draft = info;
+        ctx.setCheck(check);
         refreshUi();
+        return { ok: true, check };
       } catch (e) {
+        if (e.status === 422 && via === 'claude') return { ok: false, rejected: true, issues: e.body.issues || [], error: e.message };
+        if (e.status === 422) { toast(e.message, 'error'); return { ok: false }; }
         if (e.status === 423) { lock = e.body.lock; stopEditingLocal(); dialog({ title: 'Verrou perdu', body: `${e.message} Votre dernière modification n'a pas pu être sauvegardée : exportez le diagramme en .bpmn si besoin.`, buttons: [{ label: 'Compris', value: true, primary: true }] }); }
         else toast(`Sauvegarde impossible : ${e.message}`, 'error');
+        return { ok: false, error: e.message };
       }
     });
     return saving;
@@ -246,7 +270,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     await flushPending();
     try {
       const r = await (delta < 0 ? api.undo(id, holder) : api.redo(id, holder));
-      await ctx.loadDraft(r.xml, r.draft);
+      await ctx.loadDraft(r.xml, r.draft, r.check);
       toast(r.label);
     } catch (e) { toast(e.message, 'error'); }
   }
@@ -272,7 +296,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     if (!r.acquired) { lock = r.lock; refreshUi(); toast(`${r.lock.author || 'Quelqu\'un'} modifie déjà ce diagramme.`, 'error'); return; }
     const fresh = await api.get(id);
     ctx.rev = fresh.rev; ctx.version = fresh.version;
-    if (fresh.draft.seq !== draft?.seq) await ctx.loadDraft(fresh.xml, fresh.draft);
+    if (fresh.draft.seq !== draft?.seq) await ctx.loadDraft(fresh.xml, fresh.draft, fresh.check);
     lock = r.lock;
     ctx.editing = true;
     modeler.get('commandStack').clear();
@@ -345,7 +369,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       ctx.name = d.name;
       if ((d.rev !== ctx.rev || d.draft.seq !== draft?.seq) && !ctx.simulating) {
         ctx.rev = d.rev; ctx.version = d.version;
-        await ctx.loadDraft(d.xml, d.draft);
+        await ctx.loadDraft(d.xml, d.draft, d.check);
         ctx.emit('saved', d);
       }
       refreshUi();
@@ -360,6 +384,19 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   $('#save', root).addEventListener('click', saveVersion);
   $('#undo', root).addEventListener('click', () => serverStep(-1));
   $('#redo', root).addEventListener('click', () => serverStep(1));
+  $('#layout', root).addEventListener('click', async e => {
+    if (ctx.previewing) return;
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      await flushPending();
+      const r = await api.layout(id, holder);
+      await ctx.loadDraft(r.xml, r.draft, r.check);
+      fitView();
+      toast(`Disposition recalculée (${r.ms} ms). ↶ pour revenir à la précédente.`);
+    } catch (err) { toast(err.message, 'error'); }
+    finally { btn.disabled = false; }
+  });
 
   const expMenu = $('#expMenu', root);
   $('#exp', root).addEventListener('click', () => { expMenu.hidden = !expMenu.hidden; });
@@ -409,6 +446,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     explorer
   ];
   refreshUi();
+  refreshCheck();
 
   // ---------- temps réel : autres pages et Claude (connecteur MCP) ----------
   const focus = createFocus(modeler);
@@ -420,8 +458,8 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     }
     if (m.type === 'draft') {
       if (ctx.previewing) return; // revue ou consultation en cours : on recharge à la sortie
-      await flushPending();
-      await ctx.loadDraft(m.xml, m.draft);
+      await saving;
+      await ctx.loadDraft(m.xml, m.draft, m.check); // le serveur fait foi (annulation, réorganisation, autre page)
       if (m.label) toast(m.source === 'mcp' ? m.label.replace(/^(Annulé|Rétabli)/, 'Claude · $1') : `${m.by} · ${m.label}`);
       return;
     }
@@ -454,6 +492,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     await flushPending();
     const applier = createApplier(modeler);
     const results = [], shown = [];
+    const mark0 = modeler.get('commandStack')._stackIdx;
     importing = true; // pas de sauvegarde intermédiaire : une seule étape annulable pour l'ensemble
     try {
       for (const c of changes) {
@@ -463,12 +502,23 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       }
     } finally { importing = false; }
     const okTitles = results.filter(r => r.ok).map(r => r.title);
-    if (okTitles.length) {
-      await flushSave({ label: `Claude : ${okTitles.join(' ; ')}`.slice(0, 300), via: 'claude' });
-      if (shown.length) focus.show([...new Set(shown)], { highlight: true });
-      toast(`Claude : ${okTitles.join(' ; ')}`);
+    if (!okTitles.length) return { ok: true, results, check: ctx.check };
+    const saved = await flushSave({ label: `Claude : ${okTitles.join(' ; ')}`.slice(0, 300), via: 'claude' });
+    if (!saved.ok) {
+      // refusé par le contrôle de cohérence (ou non sauvegardé) : on revient exactement à l'état précédent
+      importing = true;
+      try { applier.undoTo(mark0); } finally { importing = false; }
+      if (saved.rejected) {
+        const ids = saved.issues.map(i => i.id).filter(id => modeler.get('elementRegistry').get(id));
+        if (ids.length) focus.show(ids, { highlight: true });
+        toast(`Claude : modification refusée (${saved.issues.length} problème${saved.issues.length > 1 ? 's' : ''} de cohérence), il corrige…`, 'error');
+        return { ok: false, rejected: true, issues: saved.issues, results };
+      }
+      return { ok: false, error: saved.error || 'Sauvegarde impossible.', results };
     }
-    return { ok: true, results };
+    if (shown.length) focus.show([...new Set(shown)], { highlight: true });
+    toast(`Claude : ${okTitles.join(' ; ')}`);
+    return { ok: true, results, check: saved.check };
   }
 
   async function renderPng(area) {

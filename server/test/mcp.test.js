@@ -92,9 +92,12 @@ function fakeBrowser() {
     if (m.type === 'apply') {
       await http('POST', `/api/diagrams/${diagramId}/lock`, { body: { holder: 'tab1' } });
       const cur = await (await http('GET', `/api/diagrams/${diagramId}`)).json();
-      const xml = cur.xml.replace('name="Signer le contrat"', 'name="Signer électroniquement"');
-      await http('PUT', `/api/diagrams/${diagramId}/draft`, { body: { xml, holder: 'tab1', label: `Claude : ${m.changes.map(c => c.title).join(' ; ')}`, via: 'claude' } });
-      ws.send(JSON.stringify({ type: 'response', reqId: m.reqId, ok: true, results: m.changes.map(c => ({ title: c.title, ok: true, added: [] })) }));
+      // « Casser » simule une modification qui rend un délai illisible
+      const xml = m.changes[0].title === 'Casser' ? cur.xml.replace('R3/P1D', '3 fois par jour') : cur.xml.replace('name="Signer le contrat"', 'name="Signer électroniquement"');
+      const res = await http('PUT', `/api/diagrams/${diagramId}/draft`, { body: { xml, holder: 'tab1', label: `Claude : ${m.changes.map(c => c.title).join(' ; ')}`, via: 'claude' } });
+      const body = await res.json();
+      const results = m.changes.map(c => ({ title: c.title, ok: true, added: [] }));
+      ws.send(JSON.stringify(res.status === 422 ? { type: 'response', reqId: m.reqId, ok: false, rejected: true, issues: body.issues, results } : { type: 'response', reqId: m.reqId, ok: true, results, check: body.check }));
     }
     if (m.type === 'render') ws.send(JSON.stringify({ type: 'response', reqId: m.reqId, ok: true, png: Buffer.from('png').toString('base64'), caption: 'Vue entière' }));
   });
@@ -109,7 +112,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   client = new Client({ name: 'test', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
   const names = (await client.listTools()).tools.map(t => t.name).sort();
-  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'explore', 'get_diagram', 'history', 'list_diagrams', 'redo', 'restore_version', 'save_version', 'show', 'undo', 'view_diagram']);
+  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'explore', 'get_diagram', 'history', 'list_diagrams', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'view_diagram']);
   const call = async (name, args) => (await client.callTool({ name, arguments: args }));
   const txt = r => r.content.map(c => c.text || '').join('\n');
 
@@ -117,6 +120,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   const summary = txt(await call('get_diagram', { diagram: 'onboarding' }));
   assert.match(summary, /\[Task_KYC\] Tâche utilisateur « Collecter les pièces KYC »/);
   assert.match(summary, /\[Timer_Relance\].*timeCycle=R3\/P1D.*sur Task_KYC \(non interrompant\)/);
+  assert.match(summary, /Cohérence :|Aucun problème/);
 
   // pas de navigateur ouvert : message clair
   const closed = await call('apply_changes', { diagram: diagramId, changes: [{ title: 'Test', ops: [{ op: 'update', id: 'Task_Signer', name: 'x' }] }] });
@@ -124,8 +128,17 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   assert.match(txt(closed), /n'est ouvert dans aucun de vos navigateurs/);
 
   browser = await fakeBrowser();
+  // une modification qui casse le workflow est refusée, avec l'explication ; rien n'est écrit
+  const seqBefore = (await (await http('GET', `/api/diagrams/${diagramId}`)).json()).draft.seq;
+  const broken = await call('apply_changes', { diagram: diagramId, changes: [{ title: 'Casser', ops: [{ op: 'set_timer', id: 'Timer_Relance', kind: 'timeCycle', value: '3 fois par jour' }] }] });
+  assert.equal(broken.isError, true);
+  assert.match(txt(broken), /Rien n'a été appliqué.*\n- \[Timer_Relance\].*délai invalide/s);
+  assert.equal((await (await http('GET', `/api/diagrams/${diagramId}`)).json()).draft.seq, seqBefore, 'brouillon inchangé');
+
   const applied = await call('apply_changes', { diagram: diagramId, changes: [{ title: 'Signature électronique', ops: [{ op: 'update', id: 'Task_Signer', name: 'Signer électroniquement' }] }] });
   assert.match(txt(applied), /✓ Signature électronique/);
+  const ms = Number(/contrôle de cohérence : ([\d.]+) ms/.exec(txt(applied))[1]);
+  assert.ok(ms < 300, `contrôle rapide (${ms} ms)`);
   let d = await (await http('GET', `/api/diagrams/${diagramId}`)).json();
   assert.match(d.xml, /Signer électroniquement/);
   assert.equal(d.draft.dirty, true);
@@ -158,6 +171,12 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   assert.equal(img.content[0].mimeType, 'image/png');
 
   assert.match(txt(await call('history', { diagram: diagramId })), /v2 .* Mathieu · Signature électronique/);
+
+  // réorganisation : une étape du brouillon, visible à l'écran, annulable
+  const lay = await call('relayout', { diagram: diagramId });
+  assert.match(txt(lay), /Disposition recalculée en \d+ ms/);
+  assert.ok(browser.received.some(m => m.type === 'draft' && m.label === 'Réorganisation automatique'));
+  assert.match(txt(await call('undo', { diagram: diagramId })), /Annulé : Réorganisation automatique/);
 });
 
 test('MCP : accès révoqué', async () => {

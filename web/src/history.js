@@ -56,7 +56,7 @@ export function createHistory(ctx, host) {
         ctx.hideBanner();
         ctx.previewing = false;
         viewing = null; savedXml = null;
-        await ctx.loadDraft(r.xml, r.draft);
+        await ctx.loadDraft(r.xml, r.draft, r.check);
         ctx.emit('mode', 'edit');
         toast(`Version ${v.version} remise dans le brouillon (↶ pour annuler).`);
         load();

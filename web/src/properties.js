@@ -5,6 +5,7 @@ import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { h, esc, dialog } from './dom.js';
 import { TYPE_LABELS, DEF_LABELS, explainIso } from '../../shared/i18n.js';
 import { entryFor } from './catalog.js';
+import { checkCoherence } from '../../shared/coherence.js';
 
 const TIMER_KINDS = [
   ['timeDuration', 'Durée', 'Délai relatif à l\'arrivée du jeton', ['PT1H', 'PT48H', 'P1D', 'P3D', 'P15D', 'P30D']],
@@ -53,14 +54,14 @@ export function createProperties(ctx, host) {
       <h3 class="props-title">${esc(bo?.name || 'Processus')}</h3>
       <p class="muted small">${esc(typeLabel(root))} · cliquez sur un élément pour voir et modifier ses propriétés.</p>
       ${is(root, 'bpmn:Process') ? '<div class="fld"><label class="lbl" for="pname">Nom du processus</label><input class="field" id="pname"></div>' : ''}
-      <h4>Cohérence du diagramme</h4>
+      <h4>Cohérence du workflow${ctx.check ? ` <span class="muted small">· contrôlé en ${ctx.check.ms} ms</span>` : ''}</h4>
       <ul class="issues"></ul>
       <h4>Raccourcis</h4>
       <ul class="tips">
         <li>Double-clic sur un élément : le renommer.</li>
         <li>Clic sur un élément : sa barre d'outils propose la suite (tâche, passerelle, délai…) et la clé à molette change son type.</li>
         <li>Déposer un événement intermédiaire sur le bord d'une tâche : il devient un événement de bordure.</li>
-        <li>Ctrl+Z / Ctrl+Y : annuler / rétablir. Ctrl+S : enregistrer.</li>
+        <li>↶ / ↷ : annuler / rétablir (y compris les modifications de Claude). Ctrl+S : enregistrer une version.</li>
       </ul>
     </div>`);
     const pname = el.querySelector('#pname');
@@ -88,41 +89,10 @@ export function createProperties(ctx, host) {
     canvas.scrollToElement(el, { top: 120, bottom: 120, left: 120, right: 120 });
   }
 
+  /** Contrôle de cohérence : celui du serveur (avec bpmnlint) s'il correspond à l'état affiché, sinon le contrôle local immédiat. */
   function lint() {
-    const out = [];
-    const nodes = registry.filter(e => e.type !== 'label' && is(e, 'bpmn:FlowNode'));
-    const add = (e, level, text) => out.push({ id: e.id, name: nameOf(e.businessObject) || typeLabel(e), level, text });
-    const tops = registry.filter(e => is(e, 'bpmn:StartEvent') && e.parent && (is(e.parent, 'bpmn:Process') || is(e.parent, 'bpmn:Participant')));
-    if (nodes.length && !tops.length) out.push({ id: canvas.getRootElement().id, name: 'Processus', level: 'warn', text: 'aucun événement de début.' });
-
-    for (const e of nodes) {
-      const bo = e.businessObject;
-      const inEventSub = bo.$parent?.triggeredByEvent;
-      const incoming = (bo.incoming || []).length;
-      const outgoing = (bo.outgoing || []).length;
-      const isComp = bo.isForCompensation || (is(e, 'bpmn:BoundaryEvent') && bo.eventDefinitions?.some(d => is(d, 'bpmn:CompensateEventDefinition')));
-      if (!incoming && !is(e, 'bpmn:StartEvent') && !is(e, 'bpmn:BoundaryEvent') && !isComp && !bo.triggeredByEvent && !(is(e, 'bpmn:IntermediateCatchEvent') && bo.eventDefinitions?.some(d => is(d, 'bpmn:LinkEventDefinition')))) {
-        add(e, 'warn', 'aucun flux entrant : il ne sera jamais atteint.');
-      }
-      if (!outgoing && !is(e, 'bpmn:EndEvent') && !isComp && !bo.triggeredByEvent && !(is(e, 'bpmn:IntermediateThrowEvent') && bo.eventDefinitions?.some(d => is(d, 'bpmn:LinkEventDefinition')))) {
-        add(e, 'warn', 'aucun flux sortant : le parcours s\'arrête ici sans fin explicite.');
-      }
-      if ((is(e, 'bpmn:ExclusiveGateway') || is(e, 'bpmn:InclusiveGateway')) && outgoing > 1) {
-        const loose = bo.outgoing.filter(f => !f.conditionExpression && bo.default !== f);
-        if (loose.length) add(e, 'warn', `${loose.length} flux sortant(s) sans condition ni flux par défaut.`);
-      }
-      if (is(e, 'bpmn:EventBasedGateway')) {
-        const bad = (bo.outgoing || []).filter(f => !is(f.targetRef, 'bpmn:IntermediateCatchEvent') && !is(f.targetRef, 'bpmn:ReceiveTask'));
-        if (bad.length) add(e, 'err', 'chaque sortie doit mener à un événement d\'attente (timer, message…) ou une tâche de réception.');
-      }
-      for (const d of bo.eventDefinitions || []) {
-        if (is(d, 'bpmn:TimerEventDefinition') && !d.timeDuration?.body && !d.timeDate?.body && !d.timeCycle?.body) add(e, 'warn', 'timer sans délai défini.');
-        const rk = REF_KINDS[d.$type];
-        if (rk && !d[rk.prop] && !is(e, 'bpmn:EndEvent') && !(is(e, 'bpmn:StartEvent') && inEventSub && rk.type === 'bpmn:Error')) add(e, 'info', `${rk.label.toLowerCase()} non référencé(e).`);
-        if (is(d, 'bpmn:ErrorEventDefinition') && is(e, 'bpmn:BoundaryEvent') && bo.cancelActivity === false) add(e, 'err', 'un événement d\'erreur de bordure est toujours interrompant.');
-      }
-    }
-    return out.sort((a, b) => ({ err: 0, warn: 1, info: 2 }[a.level] - { err: 0, warn: 1, info: 2 }[b.level]));
+    const list = ctx.check?.issues || checkCoherence(modeler.getDefinitions());
+    return list.map(i => ({ ...i, level: i.level === 'error' ? 'err' : i.level, name: (i.id && registry.get(i.id) && nameOf(registry.get(i.id).businessObject)) || i.name }));
   }
 
   // ---------- vue d'un élément ----------
@@ -418,6 +388,7 @@ export function createProperties(ctx, host) {
   });
   modeler.on('import.done', () => { current = null; render(); });
   ctx.on('editing', render);
+  ctx.on('check', () => { if (!modeler.get('selection').get().length) render(); });
   ctx.on('mode', render);
   render();
 

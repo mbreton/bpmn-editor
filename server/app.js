@@ -14,6 +14,9 @@ import { checkBpmn } from './validate.js';
 import { createHub } from './realtime.js';
 import { registerOAuth } from './oauth.js';
 import { createMcp } from './mcp.js';
+import { checkDiagram } from './coherence.js';
+import { relayout } from './layout.js';
+import { newErrors, formatIssue } from '../shared/coherence.js';
 
 const MAX_XML = 1_500_000;
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -27,7 +30,7 @@ export async function buildApp(config) {
   const git = createGitStore({ dir: config.gitDir, remote: config.gitRemote, branch: config.gitBranch || 'main', subdir: config.gitSubdir || 'diagrams', log });
   const diagrams = createDiagrams({ db, git });
   const hub = createHub({ log });
-  const mcp = createMcp({ db, diagrams, hub });
+  const mcp = createMcp({ db, diagrams, hub, checkDiagram, layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
   await git.init();
@@ -193,7 +196,7 @@ export async function buildApp(config) {
     try {
       const d = await diagrams.get(req.params.id);
       if (!d) return fail(reply, 404, 'Diagramme introuvable.');
-      return d;
+      return { ...d, check: await report(d.xml) };
     } catch (e) { return gitFail(reply, e); }
   });
 
@@ -216,6 +219,7 @@ export async function buildApp(config) {
 
   // ---------- brouillon (sauvegarde continue), annuler/rétablir, versions ----------
   const holdsLock = (d, holder) => d.lock && d.lock.holder === holder;
+  const report = async xml => { const r = await checkDiagram(xml); return { issues: r.issues, ms: r.ms }; };
   const lockedByOther = (d, u) => d.lock && d.lock.userId !== u.id;
 
   app.put('/api/diagrams/:id/draft', async (req, reply) => {
@@ -225,10 +229,19 @@ export async function buildApp(config) {
     const d = db.getDiagram(req.params.id);
     if (!d) return fail(reply, 404, 'Diagramme introuvable.');
     if (!holdsLock(d, holder)) return fail(reply, 423, d.lock ? `${d.lock.author} modifie ce diagramme.` : 'Reprenez la main (bouton « Modifier »).', { lock: d.lock });
+    // « compilation » de cohérence : une modification de Claude qui ajoute un problème bloquant est refusée
+    const after = await checkDiagram(xml);
+    if (!after.ok) return fail(reply, 422, after.issues[0].text, { issues: after.issues, ms: after.ms });
+    if (via === 'claude') {
+      const before = await checkDiagram((await diagrams.get(d.id)).xml);
+      const blocking = newErrors(before.ok ? before.issues : [], after.issues);
+      if (blocking.length) return fail(reply, 422, `Modification refusée : ${blocking.map(formatIssue).join(' ; ')}`, { issues: blocking, ms: Math.round((before.ms + after.ms) * 10) / 10 });
+    }
+    const check = { issues: after.issues, ms: after.ms };
     const author = via === 'claude' ? { ...u, name: `${u.name} (via Claude)` } : u;
     const r = await diagrams.writeDraft(d.id, { xml, user: author, label: str(label, 300) ? label : 'Modification', source: via === 'claude' ? 'mcp' : 'web' });
-    if (r.changed) hub.broadcast(d.id, { type: 'draft', xml, draft: r.draft, by: author.name, label, source: via === 'claude' ? 'mcp' : 'web' }, { exceptHolder: holder });
-    return r.draft;
+    if (r.changed) hub.broadcast(d.id, { type: 'draft', xml, draft: r.draft, check, by: author.name, label, source: via === 'claude' ? 'mcp' : 'web' }, { exceptHolder: holder });
+    return { ...r.draft, check };
   });
 
   for (const [path, delta] of [['undo', -1], ['redo', 1]]) {
@@ -240,10 +253,32 @@ export async function buildApp(config) {
       const r = await diagrams.step(d.id, delta);
       if (!r) return fail(reply, 409, delta < 0 ? 'Rien à annuler.' : 'Rien à rétablir.');
       const label = `${delta < 0 ? 'Annulé' : 'Rétabli'} : ${r.step?.label || 'modification'}`;
-      hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, by: u.name, label, source: 'web' }, { exceptHolder: req.body?.holder });
-      return { xml: r.xml, draft: r.draft, label };
+      const check = await report(r.xml);
+      hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, check, by: u.name, label, source: 'web' }, { exceptHolder: req.body?.holder });
+      return { xml: r.xml, draft: r.draft, check, label };
     });
   }
+
+  /** Réorganisation automatique : une étape du brouillon, annulable comme les autres. */
+  async function layoutDraft(d, user, { source = 'web', exceptHolder } = {}) {
+    const cur = await diagrams.get(d.id);
+    const r = await relayout(cur.xml);
+    const label = 'Réorganisation automatique';
+    const w = await diagrams.writeDraft(d.id, { xml: r.xml, user, label, source });
+    const check = await report(r.xml);
+    hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: w.draft, check, by: user.name, label, source }, { exceptHolder });
+    return { xml: r.xml, draft: w.draft, check, label, ms: r.ms, warnings: r.warnings };
+  }
+  app.decorate('layoutDraft', layoutDraft);
+
+  app.post('/api/diagrams/:id/layout', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    const d = db.getDiagram(req.params.id);
+    if (!d) return fail(reply, 404, 'Diagramme introuvable.');
+    if (lockedByOther(d, u)) return fail(reply, 423, `${d.lock.author} modifie ce diagramme.`, { lock: d.lock });
+    try { return await layoutDraft(d, u, { exceptHolder: req.body?.holder }); }
+    catch (e) { return fail(reply, 422, `Réorganisation impossible : ${e.message}`); }
+  });
 
   app.post('/api/diagrams/:id/commit', async (req, reply) => {
     const u = requireUser(req, reply); if (!u) return;
@@ -265,8 +300,9 @@ export async function buildApp(config) {
     if (!holdsLock(d, req.body?.holder)) return fail(reply, 423, 'Reprenez la main (bouton « Modifier »).', { lock: d.lock });
     const r = await diagrams.restore(d.id, String(req.body?.sha || ''), u);
     if (!r) return fail(reply, 404, 'Version introuvable.');
-    hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, by: u.name, label: `Retour à la version ${r.version.version}`, source: 'web' }, { exceptHolder: req.body.holder });
-    return { xml: r.xml, draft: r.draft, version: r.version };
+    const check = await report(r.xml);
+    hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, check, by: u.name, label: `Retour à la version ${r.version.version}`, source: 'web' }, { exceptHolder: req.body.holder });
+    return { xml: r.xml, draft: r.draft, check, version: r.version };
   });
 
   // ---------- temps réel ----------

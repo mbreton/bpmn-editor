@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { BpmnModdle } from 'bpmn-moddle';
 import { OPS_SPEC } from './ai.js';
 import { summarize } from '../shared/summary.js';
+import { formatIssue } from '../shared/coherence.js';
 import { createWalker } from '../shared/pathwalker.js';
 
 const moddle = new BpmnModdle();
@@ -14,12 +15,19 @@ const text = t => ({ content: [{ type: 'text', text: t }] });
 const fail = t => ({ content: [{ type: 'text', text: t }], isError: true });
 const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', dateStyle: 'short', timeStyle: 'short' }) : '';
 
-export function createMcp({ db, diagrams, hub, version = '1.0.0' }) {
+export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '1.0.0' }) {
+  const issuesText = (issues, { max = 15, levels = ['error', 'warn'] } = {}) => {
+    const shown = issues.filter(i => levels.includes(i.level));
+    if (!shown.length) return 'Aucun problème de cohérence.';
+    const lbl = { error: 'BLOQUANT', warn: 'à vérifier', info: 'remarque' };
+    return `Cohérence :\n${shown.slice(0, max).map(i => `- ${lbl[i.level]} · ${formatIssue(i)}`).join('\n')}${shown.length > max ? `\n… et ${shown.length - max} autre(s)` : ''}`;
+  };
+  const checked = async xml => { const r = await checkDiagram(xml); return { ...r, check: { issues: r.issues, ms: r.ms } }; };
   const explorations = new Map(); // `${userId}:${diagramId}` → [optionId…]
 
   function build(user, baseUrl) {
     const server = new McpServer({ name: 'editeur-bpmn', version }, {
-      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification, explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
+      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Chaque modification passe un contrôle de cohérence : si elle introduit un problème bloquant (condition manquante, référence cassée, délai invalide…), elle est refusée en entier avec l'explication ; corrigez et renvoyez. Les points « à vérifier » sont signalés sans bloquer. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification (et relayout si la disposition est confuse), explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
     });
     const url = id => `${baseUrl}/d/${id}`;
 
@@ -55,13 +63,14 @@ export function createMcp({ db, diagrams, hub, version = '1.0.0' }) {
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
       const full = await diagrams.get(d.id);
       if (format === 'xml') return text(full.xml);
-      const { text: body, issues } = summarize(await model(full.xml));
+      const { text: body } = summarize(await model(full.xml));
+      const { issues } = await checkDiagram(full.xml);
       const open = hub.openBy(d.id);
       return text([
         `« ${d.name} » [id ${d.id}] · version enregistrée v${full.version}${full.draft.dirty ? ' · brouillon modifié depuis' : ''}${d.lock ? ` · ${d.lock.author} est en mode édition` : ''}`,
         open.length ? `Ouvert à l'écran par : ${open.join(', ')}` : `Ouvert par personne (${url(d.id)})`,
         '', body, '',
-        issues.length ? `Problèmes de cohérence :\n${issues.map(i => `- ${i}`).join('\n')}` : 'Aucun problème de cohérence détecté.'
+        issuesText(issues, { max: 40, levels: ['error', 'warn', 'info'] })
       ].join('\n'));
     });
 
@@ -94,13 +103,16 @@ export function createMcp({ db, diagrams, hub, version = '1.0.0' }) {
       const d = find(diagram);
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
       const locked = guardLock(d); if (locked) return fail(locked);
+      const t0 = Date.now();
       const r = await hub.request(d.id, user.id, { type: 'apply', changes }, 30000);
       if (!r) return fail(notOpen(d));
+      const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}` : `✗ ${x.title} : ${x.error}`);
+      if (r.rejected) {
+        return fail(`Rien n'a été appliqué : la modification introduit ${r.issues.length > 1 ? 'des problèmes bloquants' : 'un problème bloquant'}. Corrigez puis renvoyez l'ensemble.\n${r.issues.map(i => `- ${formatIssue(i)}`).join('\n')}${lines.length ? `\n\nDétail des opérations (annulées) :\n${lines.join('\n')}` : ''}`);
+      }
       if (!r.ok) return fail(r.error || 'Modification impossible.');
-      const lines = r.results.map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}` : `✗ ${x.title} : ${x.error}`);
-      const after = await diagrams.get(d.id);
-      const { issues } = summarize(await model(after.xml));
-      return text(`${lines.join('\n')}\n\nBrouillon enregistré (annulable avec undo).${issues.length ? `\nProblèmes de cohérence :\n${issues.map(i => `- ${i}`).join('\n')}` : ''}`);
+      const issues = r.check?.issues || [];
+      return text(`${lines.join('\n')}\n\n${lines.some(l => l.startsWith('✓')) ? 'Brouillon enregistré, visible à l\'écran (annulable avec undo).' : 'Rien n\'a été modifié.'}\n${issuesText(issues)}\n(contrôle de cohérence : ${r.check?.ms ?? '?'} ms ; aller-retour complet : ${Date.now() - t0} ms)`);
     });
 
     const stepTool = (name, title, delta, description) => server.registerTool(name, {
@@ -118,11 +130,26 @@ export function createMcp({ db, diagrams, hub, version = '1.0.0' }) {
         done.push(r.step?.label || 'modification');
       }
       if (!last) return fail(delta < 0 ? 'Rien à annuler.' : 'Rien à rétablir.');
-      hub.broadcast(d.id, { type: 'draft', xml: last.xml, draft: last.draft, by: `${user.name} (via Claude)`, label: `${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}`, source: 'mcp' });
-      return text(`${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}.`);
+      const { check, issues } = await checked(last.xml);
+      hub.broadcast(d.id, { type: 'draft', xml: last.xml, draft: last.draft, check, by: `${user.name} (via Claude)`, label: `${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}`, source: 'mcp' });
+      return text(`${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}.\n${issuesText(issues)}`);
     });
     stepTool('undo', 'Annuler', -1, 'Annule la ou les dernières modifications du brouillon (celles de Claude comme celles faites à l\'écran).');
     stepTool('redo', 'Rétablir', 1, 'Rétablit une modification annulée.');
+
+    server.registerTool('relayout', {
+      title: 'Réorganiser la disposition',
+      description: 'Recalcule entièrement la disposition du diagramme (alignement, espacement, tracé des flux), sans rien changer au processus lui-même. Remplace la mise en page faite à la main : à proposer quand la disposition est confuse (flux qui traversent des éléments, éléments entassés), puis vérifier avec view_diagram. Annulable avec undo.',
+      inputSchema: { diagram: z.string() }
+    }, async ({ diagram }) => {
+      const d = find(diagram);
+      if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
+      const locked = guardLock(d); if (locked) return fail(locked);
+      try {
+        const r = await layout(d, { ...user, name: `${user.name} (via Claude)` });
+        return text(`Disposition recalculée en ${r.ms} ms${r.warnings.length ? ` (avertissements : ${r.warnings.join(', ')})` : ''}. Visible à l'écran, annulable avec undo. Vérifiez le rendu avec view_diagram.`);
+      } catch (e) { return fail(`Réorganisation impossible : ${e.message}`); }
+    });
 
     server.registerTool('save_version', {
       title: 'Enregistrer une version',
@@ -198,7 +225,8 @@ export function createMcp({ db, diagrams, hub, version = '1.0.0' }) {
       const locked = guardLock(d); if (locked) return fail(locked);
       const r = await diagrams.restore(d.id, sha, { ...user, name: `${user.name} (via Claude)` });
       if (!r) return fail(`Version « ${sha} » introuvable.`);
-      hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, by: `${user.name} (via Claude)`, label: `Retour à la version ${r.version.version}`, source: 'mcp' });
+      const { check } = await checked(r.xml);
+      hub.broadcast(d.id, { type: 'draft', xml: r.xml, draft: r.draft, check, by: `${user.name} (via Claude)`, label: `Retour à la version ${r.version.version}`, source: 'mcp' });
       return text(`Brouillon remis à la version ${r.version.version} (${r.version.message}).`);
     });
 
