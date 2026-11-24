@@ -6,9 +6,9 @@
 - **Git** : un fichier `.bpmn` par diagramme et un commit par enregistrement, avec la personne connectée comme auteur. L'historique permet de consulter et de restaurer chaque version. On peut ajouter un dépôt distant (GitHub, GitLab…) : il est cloné au démarrage, récupéré régulièrement, et chaque enregistrement y est poussé.
 - **Édition** : une seule personne modifie un diagramme à la fois, grâce à un verrou. Les autres voient qui modifie, et récupèrent la nouvelle version une fois qu'elle est enregistrée.
 - **Propriétés** en français : délais (ISO 8601 traduit en clair), événements interrompants ou non, erreurs, messages, conditions sur les flux sortants des passerelles, documentation. Chaque élément affiche une aide contextuelle, et un contrôle de cohérence passe sur tout le diagramme.
-- **Assistant IA conversationnel** : on discute du diagramme par écrit ou à la voix, la réponse s'affiche au fil de l'eau. Ensuite, l'IA propose des **modifications une par une**. Pour chacune, l'éditeur zoome sur la zone concernée, explique pourquoi et ce que ça apporte, et on accepte ou on refuse.
+- **Assistant IA conversationnel**, par écrit ou en **conversation vocale** : l'IA *montre* ce dont elle parle. Elle zoome et surligne les éléments du diagramme au moment où elle les évoque, et peut faire une visite guidée zone par zone. Elle connaît la sélection et ce qui est visible à l'écran (« ici », « cette partie »). Elle propose ensuite des **modifications une par une** : pour chacune, l'éditeur zoome sur la zone concernée et explique pourquoi et ce que ça apporte. On accepte ou on refuse, à la souris ou de vive voix (« accepter », « refuser », « arrêter », « répète »).
 - **Centre d'aide** : recherche par intention (« relancer », « si / sinon »…), avec une vignette, une explication et l'insertion directe dans le diagramme.
-- **Simulation pas à pas** : « Étape suivante » démarre le jeton, puis le fait avancer élément par élément. Quand plusieurs événements sont possibles (réponse reçue ou délai écoulé), elle demande lequel se produit.
+- **Explorateur de parcours** : à chaque situation, il liste **toutes les suites que le diagramme autorise**. Ce sont les branches d'une passerelle (avec leurs conditions), la fin normale d'une tâche, chaque événement de bordure qui peut survenir (interrompant ou en parallèle), la course entre une réponse et un délai, et les sous-processus événementiels déclenchables « à tout moment ». On choisit une suite au clic ou au clavier (1-9), on revient en arrière pour essayer les autres, et le chemin parcouru reste surligné. Les branches qui s'arrêtent sans fin, les erreurs non capturées et les compensations exécutées sont signalées. « Ce n'est pas ce que j'attendais » ouvre l'assistant avec le parcours et les suites possibles, pour discuter de l'écart et corriger.
 - Le **panneau latéral** est redimensionnable. **Export** en `.bpmn`, SVG et PNG.
 
 ## Déploiement sur Coolify
@@ -58,14 +58,17 @@ server/
 web/src/
   editor.js     modeler bpmn-js, verrou, enregistrement, panneau redimensionnable
   assistant.js  conversation + revue une par une ; aiops.js applique les opérations
-  properties.js, help.js (+ catalog.js), simulation.js, history.js
+  explorer.js   explorateur de parcours ; pathwalker.js calcule les suites possibles (testé sur le diagramme d'exemple)
+  voice.js      conversation vocale (reconnaissance, envoi après une pause, lecture phrase par phrase, zoom synchronisé)
+  properties.js, help.js (+ catalog.js), history.js
 ```
 
 ## Limites connues
 
 - **Pas de branches dans l'interface.** Tout est commité sur une seule branche, mais le dépôt reste un dépôt Git standard : vous pouvez y travailler en branches à côté et fusionner sur la branche configurée. La synchronisation récupère alors les fichiers.
 - **Conflits avec des commits extérieurs** : si une modification faite directement dans le dépôt touche le même fichier qu'un enregistrement local pas encore poussé, la synchronisation s'arrête sans rien écraser et l'erreur s'affiche dans **Administration → Dépôt Git**.
-- **La dictée** dépend du navigateur (Chrome, Edge, Safari, en HTTPS uniquement). Sous Chrome, l'audio est transcrit par un service de Google.
+- **La voix** passe par le navigateur : reconnaissance vocale de Chrome, Edge ou Safari et voix de synthèse du système, **en HTTPS uniquement**. Sous Chrome, l'audio est transcrit par un service de Google. L'API d'Anthropic ne fournit pas de voix : seul le texte passe par le modèle. Pour une voix plus naturelle ou une transcription souveraine, on peut brancher un service de reconnaissance et de synthèse côté serveur.
+- **L'explorateur** suit la sémantique BPMN courante : passerelles, événements de bordure, sous-processus et sous-processus événementiels, erreurs, terminaison, compensation. Il n'évalue pas les conditions, c'est vous qui choisissez la branche. Les pools et les flux de messages entre participants ne sont pas simulés.
 - **Une seule personne modifie un diagramme à la fois** : il n'y a pas de coédition en temps réel.
 
 Le logo bpmn.io affiché dans le canevas est exigé par la licence de bpmn-js et doit rester visible.

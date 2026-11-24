@@ -25,7 +25,6 @@
     "@bpmn-io/diagram-js-canvas-lock": "^0.1.0",
     "bpmn-auto-layout": "^1.3.0",
     "bpmn-js": "^18.33.1",
-    "bpmn-js-token-simulation": "^1.1.0",
     "concurrently": "^10.0.7",
     "vite": "^8.3.8"
   }

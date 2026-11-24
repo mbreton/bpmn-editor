@@ -1,10 +1,8 @@
 import BpmnModeler from 'bpmn-js/lib/Modeler';
-import TokenSimulationModule from 'bpmn-js-token-simulation';
 import CanvasLockModule from '@bpmn-io/diagram-js-canvas-lock';
 import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
-import 'bpmn-js-token-simulation/assets/css/bpmn-js-token-simulation.css';
 import '@bpmn-io/diagram-js-canvas-lock/assets/canvas-lock.css';
 
 import { api } from './api.js';
@@ -13,7 +11,7 @@ import { TranslateModule } from './i18n.js';
 import { createProperties } from './properties.js';
 import { createAssistant } from './assistant.js';
 import { createHelp } from './help.js';
-import { createSimulation } from './simulation.js';
+import { createExplorer } from './explorer.js';
 import { createHistory } from './history.js';
 
 const RENEW_MS = 30_000;
@@ -58,7 +56,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
         <button class="btn primary" id="edit">Modifier</button>
         <button class="btn primary edit-only" id="save">Enregistrer</button>
         <button class="btn edit-only" id="done">Terminer</button>
-        <button class="btn" id="sim" aria-pressed="false">Simuler</button>
+        <button class="btn" id="sim" aria-pressed="false" title="Parcourir le processus étape par étape et voir toutes les suites possibles">Explorer les parcours</button>
         <div class="menu-wrap"><button class="btn" id="exp" aria-haspopup="true">Exporter</button>
           <div class="menu" id="expMenu" hidden>
             <button data-x="link">Copier le lien de la page</button>
@@ -71,7 +69,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       <div class="ed-canvas-wrap">
         <div class="ed-canvas" id="canvas"></div>
         <div class="ed-banner" id="banner" hidden></div>
-        <div class="sim-bar" id="simBar" hidden></div>
+        <div class="ex-bar" id="simBar" hidden></div>
       </div>
       <div class="side-resize" id="resize" role="separator" aria-orientation="vertical" aria-label="Largeur du panneau" tabindex="0"></div>
       <aside class="ed-side" id="side">
@@ -92,7 +90,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   const edEl = $('.ed', root);
   const modeler = new BpmnModeler({
     container: $('#canvas', root),
-    additionalModules: [TranslateModule, CanvasLockModule, TokenSimulationModule]
+    additionalModules: [TranslateModule, CanvasLockModule]
   });
   const canvasLock = modeler.get('canvasLock');
   window.__bpmnModeler = modeler; // utile pour le débogage depuis la console
@@ -366,7 +364,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     createAssistant(ctx, $('[data-panel=ai]', root)),
     createHelp(ctx, $('[data-panel=help]', root)),
     createHistory(ctx, $('[data-panel=history]', root)),
-    createSimulation(ctx, { button: $('#sim', root), bar: $('#simBar', root) })
+    createExplorer(ctx, { button: $('#sim', root), bar: $('#simBar', root) })
   ];
   refreshUi();
 

@@ -267,11 +267,12 @@ export async function buildApp(config) {
   app.post('/api/diagrams/:id/chat', { config: { rateLimit: { max: config.aiRateLimit ?? 60, timeWindow: '1 hour' } } }, async (req, reply) => {
     const u = requireUser(req, reply); if (!u) return;
     if (!ai.enabled) return fail(reply, 503, 'Assistant IA non configuré sur ce serveur.');
-    const { xml, history, mode, selection } = req.body || {};
+    const { xml, history, mode, selection, visible, voice } = req.body || {};
     if (!isXml(xml)) return fail(reply, 400, 'XML BPMN invalide ou trop volumineux.');
     if (!Array.isArray(history) || history.length < 1 || history.length > 60) return fail(reply, 400, 'Historique de conversation invalide.');
     for (const m of history) if (!m || !['user', 'assistant'].includes(m.role) || !str(m.content, 40000)) return fail(reply, 400, 'Message invalide.');
-    const sel = Array.isArray(selection) ? selection.slice(0, 20).filter(s => s && typeof s.id === 'string').map(s => ({ id: s.id.slice(0, 100), name: String(s.name || '').slice(0, 200) })) : [];
+    const refs = (list, max) => Array.isArray(list) ? list.slice(0, max).filter(s => s && typeof s.id === 'string').map(s => ({ id: s.id.slice(0, 100), name: String(s.name || '').slice(0, 200) })) : [];
+    const sel = refs(selection, 20), vis = refs(visible, 40);
 
     reply.hijack();
     const res = reply.raw;
@@ -285,7 +286,7 @@ export async function buildApp(config) {
     send({ type: 'status', text: `Diagramme transmis au modèle ${ai.model} (${elements} éléments)…` });
     let chars = 0;
     try {
-      for await (const text of ai.chat({ xml, history, mode: mode === 'propose' ? 'propose' : 'chat', selection: sel }, ac.signal)) {
+      for await (const text of ai.chat({ xml, history, mode: mode === 'propose' ? 'propose' : 'chat', selection: sel, visible: vis, voice: voice === true }, ac.signal)) {
         if (chars === 0) send({ type: 'status', text: 'Le modèle rédige sa réponse…' });
         chars += text.length;
         send({ type: 'delta', text });

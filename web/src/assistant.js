@@ -1,21 +1,29 @@
-// Assistant IA conversationnel : on discute du diagramme (écrit ou dicté), puis l'IA propose des
-// modifications que l'on passe en revue une par une sur le diagramme (zoom, explication, accepter/refuser).
+// Assistant IA conversationnel, à l'écrit ou à la voix. L'IA montre sur le diagramme ce dont elle
+// parle (balises <focus>), puis propose des modifications que l'on passe en revue une par une.
 import { h, esc, toast } from './dom.js';
 import { createApplier, parseChanges, withoutChanges } from './aiops.js';
+import { createFocus } from './focus.js';
+import { createVoice, voiceSupport } from './voice.js';
 
 const SUGGESTIONS = [
-  'Passe en revue tout le diagramme et dis-moi ce qui pourrait poser problème',
-  'Explique-moi ce que fait ce processus, étape par étape',
+  'Fais-moi une visite guidée du diagramme, zone par zone',
+  'Passe en revue le diagramme et dis-moi ce qui pourrait poser problème',
   'Comment gérer un client qui ne répond pas pendant la collecte des pièces ?',
   'Que se passe-t-il si le délai contractuel expire ?'
 ];
+const FOCUS_RE = /<focus\s+ids="([^"]*)"\s*\/?>/gi;
 
-/** Markdown minimal et sûr : paragraphes, listes « - », **gras**, `code`. */
+/** Markdown minimal et sûr : paragraphes, listes, **gras**, `code`, et pastilles « voir » pour les balises focus. */
 export function renderMd(text) {
-  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const chips = [];
+  const src = String(text).replace(FOCUS_RE, (_, ids) => { chips.push(ids); return `\u0000${chips.length - 1}\u0000`; }).replace(/<focus[^>]*$/i, '');
+  const inline = s => esc(s)
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\u0000(\d+)\u0000/g, (_, i) => `<button type="button" class="focus-chip" data-ids="${esc(chips[i])}" title="Montrer sur le diagramme">◎</button>`);
   const out = [];
   let list = null;
-  for (const raw of String(text).split('\n')) {
+  for (const raw of src.split('\n')) {
     const line = raw.trimEnd();
     const li = /^\s*(?:[-*•]|\d+[.)])\s+(.*)$/.exec(line);
     if (li) { if (!list) { list = []; out.push(list); } list.push(inline(li[1])); continue; }
@@ -25,14 +33,17 @@ export function renderMd(text) {
   return out.map(x => Array.isArray(x) ? `<ul>${x.map(i => `<li>${i}</li>`).join('')}</ul>` : x).join('');
 }
 
+const focusIdsIn = text => { const all = []; String(text).replace(FOCUS_RE, (_, l) => { all.push(l.split(',').map(s => s.trim()).filter(Boolean)); return ''; }); return all; };
+
 export function createAssistant(ctx, host) {
   const { modeler } = ctx;
   const selection = modeler.get('selection');
   const canvas = modeler.get('canvas');
+  const focus = createFocus(modeler);
   const storeKey = `bpmn.chat.${ctx.id}`;
 
   if (!ctx.cfg.ai) {
-    host.append(h(`<div class="props"><h3 class="props-title">Assistant IA</h3><p class="note">L'assistant n'est pas configuré sur ce serveur. L'administrateur doit définir <code>LLM_API_KEY</code> (et éventuellement <code>LLM_PROVIDER</code>, <code>LLM_MODEL</code>, <code>LLM_BASE_URL</code>).</p></div>`));
+    host.append(h(`<div class="props"><p class="note">L'assistant n'est pas configuré sur ce serveur. L'administrateur doit définir <code>LLM_API_KEY</code> (et éventuellement <code>LLM_PROVIDER</code>, <code>LLM_MODEL</code>, <code>LLM_BASE_URL</code>).</p></div>`));
     return { destroy() {} };
   }
 
@@ -42,20 +53,32 @@ export function createAssistant(ctx, host) {
 
   let busy = false;
   let controller = null;
-  let review = null;           // revue en cours
-  let autoReview = null;       // revue à lancer dès la fin de la réponse
+  let review = null;
+  let autoReview = null;
+  let pendingContext = null;   // contexte joint au prochain message (parcours de l'explorateur)
 
+  const support = voiceSupport();
   const el = h(`<div class="ai">
     <div class="ai-head">
-      <p class="muted small">Discutez du diagramme comme avec un consultant. Quand vous êtes d'accord, demandez les modifications : vous les examinerez une par une sur le diagramme.</p>
-      <button class="btn small ghost" data-a="reset" title="Effacer la conversation">Nouvelle conversation</button>
+      <p class="muted small">Discutez du diagramme comme avec un consultant : il vous montre sur le diagramme ce dont il parle. Quand vous êtes d'accord, il propose des modifications que vous examinez une par une.</p>
+      <div class="row">
+        <button class="btn small" data-a="voice" aria-pressed="false">🎙 Conversation vocale</button>
+        <button class="btn small ghost" data-a="reset" title="Effacer la conversation">Nouvelle conversation</button>
+      </div>
+    </div>
+    <div class="voice-panel" hidden>
+      <div class="orb" aria-hidden="true"><span></span></div>
+      <div class="vp-text"><b class="vp-state">Je vous écoute…</b><span class="vp-heard muted small"></span></div>
+      <div class="row"><button class="btn small" data-a="interrupt">Couper la parole</button><button class="btn small ghost" data-a="voice-off">Terminer</button></div>
     </div>
     <div class="ai-log" aria-live="polite"></div>
     <div class="ai-suggest"></div>
     <form class="ai-compose">
+      <div class="ctx-note" hidden><span></span><button type="button" class="linklike small">retirer</button></div>
       <textarea class="field" rows="3" placeholder="Posez une question ou décrivez ce que vous voulez changer… (Entrée pour envoyer)"></textarea>
       <div class="row">
         <button type="button" class="btn icon mic" title="Dicter" aria-label="Dicter" aria-pressed="false">🎙</button>
+        <label class="sw-lbl small" title="Zoomer sur les éléments dont parle l'IA"><input type="checkbox" class="follow" checked> Suivre sur le diagramme</label>
         <span class="muted small hint-sel"></span>
         <button type="button" class="btn" data-a="propose">Proposer les modifications</button>
         <button type="submit" class="btn primary">Envoyer</button>
@@ -70,8 +93,12 @@ export function createAssistant(ctx, host) {
   const sendBtn = form.querySelector('[type=submit]');
   const proposeBtn = form.querySelector('[data-a=propose]');
   const micBtn = form.querySelector('.mic');
+  const follow = form.querySelector('.follow');
   const hintSel = form.querySelector('.hint-sel');
   const suggest = el.querySelector('.ai-suggest');
+  const ctxNote = form.querySelector('.ctx-note');
+  const voiceBtn = el.querySelector('[data-a=voice]');
+  const vp = el.querySelector('.voice-panel');
 
   for (const s of SUGGESTIONS) {
     const c = h('<button type="button" class="chip"></button>');
@@ -79,6 +106,12 @@ export function createAssistant(ctx, host) {
     c.addEventListener('click', () => send(s));
     suggest.append(c);
   }
+
+  // Pastilles « ◎ » : montrer sur le diagramme.
+  log.addEventListener('click', e => {
+    const b = e.target.closest('.focus-chip');
+    if (b) focus.show(b.dataset.ids.split(',').map(s => s.trim()), { highlight: true });
+  });
 
   // ---------- affichage ----------
   function bubble(role, text) {
@@ -137,21 +170,27 @@ export function createAssistant(ctx, host) {
     suggest.hidden = history.length > 0 || busy;
     const sel = selection.get().filter(e => e.type !== 'label');
     hintSel.textContent = sel.length ? `Sélection : ${sel.map(e => e.businessObject.name || e.id).slice(0, 3).join(', ')}` : '';
+    ctxNote.hidden = !pendingContext;
   }
 
   // ---------- échange avec le serveur (flux SSE) ----------
-  async function send(text, mode = 'chat') {
+  async function send(text, mode = 'chat', { display } = {}) {
     if (busy || review) return;
     const typed = (text || '').trim();
-    const content = typed || (mode === 'propose' ? 'Propose les modifications dont nous avons parlé.' : '');
+    let content = typed || (mode === 'propose' ? 'Propose les modifications dont nous avons parlé.' : '');
     if (!content) return;
+    const shown = display || (mode === 'propose' && !typed ? 'Propose les modifications.' : content);
+    if (pendingContext) { content = `${pendingContext}\n\n${content}`; pendingContext = null; }
     const sel = selection.get().filter(e => e.type !== 'label').map(e => ({ id: e.id, name: e.businessObject.name || '' }));
-    history.push({ role: 'user', content, display: mode === 'propose' && !typed ? 'Propose les modifications.' : content });
+    const visible = focus.visible();
+    history.push({ role: 'user', content, display: shown });
     persist();
-    bubble('user', history.at(-1).display);
+    bubble('user', shown);
     ta.value = '';
     busy = true;
     refresh();
+    const speaking = voice?.active;
+    if (speaking) voice.beginResponse();
 
     const out = h('<div class="msg ai streaming"><div class="md"></div><div class="progress"><span class="spin"></span><span class="st">Préparation…</span><span class="el"></span></div></div>');
     log.append(out);
@@ -160,13 +199,14 @@ export function createAssistant(ctx, host) {
     const t0 = Date.now();
     const tick = setInterval(() => { elapsed.textContent = ` · ${Math.round((Date.now() - t0) / 1000)} s`; }, 1000);
     let full = '';
+    let focusSeen = 0;
     controller = new AbortController();
 
     try {
       const xml = await ctx.getXml();
       const res = await fetch(`/api/diagrams/${ctx.id}/chat`, {
         method: 'POST', headers: { 'content-type': 'application/json' }, signal: controller.signal, credentials: 'same-origin',
-        body: JSON.stringify({ xml, mode, selection: sel, history: history.map(({ role, content }) => ({ role, content })) })
+        body: JSON.stringify({ xml, mode, selection: sel, visible, voice: !!speaking, history: history.map(({ role, content: c }) => ({ role, content: c })) })
       });
       if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.error || `Erreur ${res.status}`); }
       const reader = res.body.getReader();
@@ -190,7 +230,12 @@ export function createAssistant(ctx, host) {
             if (block) {
               const n = (block[1].match(/"title"\s*:/g) || []).length;
               st.textContent = n ? `Rédaction des modifications : ${n} en cours…` : 'Rédaction des modifications…';
-            } else st.textContent = 'Le modèle rédige sa réponse…';
+            } else st.textContent = speaking ? 'L\'assistant parle…' : 'Le modèle rédige sa réponse…';
+            if (speaking) voice.pushResponse(full);
+            else if (follow.checked) {
+              const tags = focusIdsIn(withoutChanges(full));
+              if (tags.length > focusSeen) { focusSeen = tags.length; focus.show(tags.at(-1), { highlight: true }); }
+            }
             log.scrollTop = log.scrollHeight;
           }
         }
@@ -207,35 +252,54 @@ export function createAssistant(ctx, host) {
         b.append(changesSummary(changes, idx));
         if (ctx.editing) autoReview = { changes, idx };
       }
+      if (speaking) {
+        // En vocal, la revue commence une fois la réponse entièrement lue.
+        const pendingReview = autoReview;
+        autoReview = null;
+        voice.endResponse(full, pendingReview ? () => setTimeout(() => startReview(pendingReview.changes, pendingReview.idx), 0) : null);
+      }
     } catch (e) {
       out.remove();
       history.pop(); persist();
       if (e.name === 'AbortError') bubble('sys', 'Demande interrompue.');
-      else { bubble('err', e.message); ta.value = typed; }
+      else { bubble('err', e.message); ta.value = typed; if (speaking) voice.say(`Désolé, une erreur est survenue : ${e.message}`); }
     } finally {
       clearInterval(tick);
       busy = false; controller = null;
       refresh();
     }
     if (autoReview) { const a = autoReview; autoReview = null; startReview(a.changes, a.idx); }
+    else if (speaking && !ctx.editing && Array.isArray(parseChanges(full))) voice.say('Pour appliquer ces modifications, passez d\'abord en mode édition avec le bouton Modifier.');
   }
+
+  /** Ouvre la conversation avec un contexte (ex. le parcours de l'explorateur). */
+  ctx.discuss = ({ prefill = '', context = '', send: now } = {}) => {
+    ctx.selectTab('ai');
+    if (context) { pendingContext = context; ctxNote.querySelector('span').textContent = '📎 Parcours de l\'explorateur joint au prochain message'; }
+    refresh();
+    if (now) { send(now); return; }
+    ta.value = prefill;
+    ta.focus();
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+  };
+  ctxNote.querySelector('button').addEventListener('click', () => { pendingContext = null; refresh(); });
 
   // ---------- revue des modifications, une par une ----------
   function startReview(changes, historyIdx) {
     if (review || busy) return;
     if (!ctx.editing) { toast('Passez en mode édition (bouton « Modifier ») pour examiner les modifications.', 'error'); return; }
-    if (ctx.simulating) { toast('Quittez la simulation pour examiner les modifications.', 'error'); return; }
     ctx.selectTab('ai');
-    review = { changes, historyIdx, i: -1, results: [], applier: createApplier(modeler), current: null };
+    review = { changes, historyIdx, i: -1, results: [], applier: createApplier(modeler), current: null, actions: {} };
     ctx.previewing = true; // verrouille l'édition manuelle pendant la revue
-    ctx.applyLock();
     ctx.emit('mode', 'review');
+    ctx.applyLock();
     refresh();
     next();
   }
 
   function clearMarks() {
     const res = review?.current?.res;
+    focus.clear();
     if (!res?.ok) return;
     for (const id of res.added) try { canvas.removeMarker(id, 'ai-added'); } catch { /* supprimé */ }
     for (const id of res.changed) try { canvas.removeMarker(id, 'ai-changed'); } catch { /* supprimé */ }
@@ -263,7 +327,7 @@ export function createAssistant(ctx, host) {
       <div class="rv-text">
         <div class="rv-head"><span class="rv-count"></span><b class="rv-title"></b></div>
         <p class="rv-why"></p><p class="rv-benefit"></p><p class="rv-err"></p>
-        <span class="legend"><i class="sw add"></i>ajouté <i class="sw chg"></i>modifié</span>
+        <span class="legend"><i class="sw add"></i>ajouté <i class="sw chg"></i>modifié${voice?.active ? ' · dites « accepter », « refuser » ou « arrêter »' : ''}</span>
       </div>
       <div class="row rv-actions"></div></div>`);
     card.querySelector('.rv-count').textContent = `${i}/${n}`;
@@ -274,16 +338,23 @@ export function createAssistant(ctx, host) {
     const err = card.querySelector('.rv-err');
     const actions = card.querySelector('.rv-actions');
     const btn = (label, cls, fn) => { const b = h(`<button class="btn ${cls}"></button>`); b.textContent = label; b.addEventListener('click', fn); actions.append(b); return b; };
+    const accept = () => { review.results.push('accepted'); next(); };
+    const refuseNext = () => { refuse(); next(); };
+    const stop = () => { refuse(); endReview(true); };
     if (res.ok) {
       err.remove();
-      btn('Arrêter la revue', 'ghost', () => { refuse(); endReview(true); });
-      btn('Refuser', '', () => { refuse(); next(); });
-      btn('Accepter', 'primary', () => { review.results.push('accepted'); next(); }).focus();
+      btn('Arrêter la revue', 'ghost', stop);
+      btn('Refuser', '', refuseNext);
+      btn('Accepter', 'primary', accept).focus();
+      review.actions = { accept, refuse: refuseNext, stop };
+      if (voice?.active) voice.say(`Modification ${i} sur ${n} : ${change.title}. ${change.why || ''} ${change.benefit ? `Apport : ${change.benefit}` : ''} Vous l'acceptez ?`);
     } else {
       card.querySelector('.legend').remove();
       err.textContent = `Impossible d'appliquer cette modification : ${res.error}.`;
       btn('Arrêter la revue', 'ghost', () => endReview(true));
       btn(i < n ? 'Passer à la suivante' : 'Terminer', 'primary', () => next()).focus();
+      review.actions = { accept: () => next(), refuse: () => next(), stop: () => endReview(true) };
+      if (voice?.active) voice.say(`La modification ${i}, ${change.title}, ne peut pas être appliquée. Je passe à la suite ?`);
     }
     ctx.showBanner(card);
   }
@@ -304,7 +375,6 @@ export function createAssistant(ctx, host) {
     const pick = kind => changes.filter((_, k) => results[k] === kind);
     const acc = pick('accepted'), ref = pick('refused'), fail = pick('failed');
     if (history[historyIdx]) history[historyIdx].reviewed = results.slice();
-    // Le résultat de la revue est transmis au modèle avec le prochain message.
     history.push({ role: 'user', hidden: true, content: `[Résultat de la revue] Acceptées : ${acc.map(c => c.title).join(' ; ') || 'aucune'}. Refusées : ${ref.map(c => c.title).join(' ; ') || 'aucune'}.${fail.length ? ` Non applicables : ${fail.map(c => c.title).join(' ; ')}.` : ''}` });
     persist();
     review = null;
@@ -314,11 +384,51 @@ export function createAssistant(ctx, host) {
     ctx.emit('mode', 'edit');
     renderHistory();
     const plural = (k, w) => `${k} ${w}${k > 1 ? 's' : ''}`;
-    bubble('sys', acc.length
+    const summary = acc.length
       ? `${plural(acc.length, 'modification')} appliquée${acc.length > 1 ? 's' : ''}${ref.length ? `, ${plural(ref.length, 'refusée')}` : ''}${fail.length ? `, ${fail.length} non applicable${fail.length > 1 ? 's' : ''}` : ''}. Pensez à enregistrer ; Ctrl+Z annule si besoin.`
-      : stopped ? 'Revue arrêtée : aucune modification appliquée.' : 'Aucune modification appliquée.');
+      : stopped ? 'Revue arrêtée : aucune modification appliquée.' : 'Aucune modification appliquée.';
+    bubble('sys', summary);
+    if (voice?.active) voice.say(acc.length ? `C'est fait : ${summary.replace(/ ; Ctrl\+Z annule si besoin\./, '.')} On continue ?` : `${summary} On continue ?`);
     refresh();
   }
+
+  // ---------- conversation vocale ----------
+  const STATES = { listening: 'Je vous écoute…', thinking: 'Je réfléchis…', speaking: 'Je parle… (vous pouvez me couper)', denied: 'Micro refusé par le navigateur.', off: '' };
+  const voice = support.ok ? createVoice({
+    onUtterance(text) {
+      if (review) return voiceCommand(text);
+      send(text);
+    },
+    onState(s) { vp.dataset.state = s; vp.querySelector('.vp-state').textContent = STATES[s] || ''; if (s === 'denied') setVoice(false); },
+    onFocus(ids) { focus.show(ids, { highlight: true }); },
+    onTranscript(t) { vp.querySelector('.vp-heard').textContent = t; }
+  }) : null;
+
+  function voiceCommand(text) {
+    const t = text.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const a = review.actions;
+    if (/\b(refus|non|rejet|pas celle|annule)/.test(t)) return a.refuse();
+    if (/\b(arrete|stop|termine|fini)/.test(t)) return a.stop();
+    if (/\b(accept|oui|ok|d'accord|daccord|valide|vas-y|go|parfait)/.test(t)) return a.accept();
+    if (/\b(repete|redis|encore)/.test(t)) { const c = review.current?.change; return voice.say(c ? `${c.title}. ${c.why || ''} ${c.benefit || ''} Vous l'acceptez ?` : 'Je passe à la suite.'); }
+    voice.say('Dites accepter, refuser, ou arrêter la revue.');
+  }
+
+  function setVoice(on) {
+    if (!voice) return;
+    voiceBtn.setAttribute('aria-pressed', String(on));
+    voiceBtn.classList.toggle('active', on);
+    vp.hidden = !on;
+    el.classList.toggle('voice-on', on);
+    if (on) {
+      voice.start();
+      if (!history.some(m => !m.hidden)) voice.say('Bonjour. Je regarde votre diagramme avec vous. Voulez-vous une visite guidée, ou avez-vous une question précise ?');
+    } else voice.stop();
+  }
+  if (!voice) { voiceBtn.disabled = true; voiceBtn.title = support.reason; }
+  voiceBtn.addEventListener('click', () => setVoice(!voice?.active));
+  vp.querySelector('[data-a=voice-off]').addEventListener('click', () => setVoice(false));
+  vp.querySelector('[data-a=interrupt]').addEventListener('click', () => { voice?.interrupt(); });
 
   // ---------- saisie ----------
   form.addEventListener('submit', e => {
@@ -330,17 +440,16 @@ export function createAssistant(ctx, host) {
   proposeBtn.addEventListener('click', () => send(ta.value, 'propose'));
   el.querySelector('[data-a=reset]').addEventListener('click', () => {
     if (busy || review) return;
-    history = []; persist(); renderHistory(); refresh();
+    history = []; persist(); renderHistory(); focus.clear(); refresh();
   });
 
-  // ---------- dictée (navigateur, HTTPS requis) ----------
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  // Dictée simple dans la zone de texte (sans lecture des réponses).
   let rec = null;
-  if (!SR || !window.isSecureContext) micBtn.hidden = true;
+  if (!support.ok) { micBtn.hidden = true; }
   else {
     micBtn.addEventListener('click', () => {
       if (rec) { rec.stop(); return; }
-      rec = new SR();
+      rec = new support.SR();
       rec.lang = 'fr-FR'; rec.interimResults = true; rec.continuous = true;
       const prefix = ta.value ? ta.value.replace(/\s*$/, ' ') : '';
       rec.onresult = e => { let t = ''; for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript; ta.value = prefix + t; };
@@ -362,5 +471,5 @@ export function createAssistant(ctx, host) {
 
   renderHistory();
   refresh();
-  return { destroy() { rec?.abort(); controller?.abort(); } };
+  return { destroy() { rec?.abort(); controller?.abort(); voice?.stop(); } };
 }

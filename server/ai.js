@@ -34,6 +34,9 @@ How to behave:
 - Refer to elements by their name (and id in backticks when it helps, e.g. \`Task_KYC\`).
 - Discuss, explain, challenge the model and ask clarifying questions when the intent is unclear. It is a conversation: take every remark of the user into account in later answers.
 - NEVER output BPMN XML.
+- To show the user the part of the diagram you are talking about, put a focus tag right before the sentence: <focus ids="Task_KYC,Timer_Relance"/>. The editor zooms on those elements and highlights them while the sentence is displayed or spoken. Use it every time you talk about specific elements, with existing ids only. When you walk the user through the diagram, go zone by zone, each with its own focus tag.
+- The user's message may include the elements currently visible on their screen and the ones they selected: "ici", "cette partie", "ça" usually refer to them.
+- The user may paste a path explored in the step-by-step explorer (steps taken and the next steps the diagram allows). Use it to understand where the diagram diverges from what they expect.
 - Only when the user asks you to apply, make, propose or implement changes (or when the message says "MODE PROPOSITION"), end your answer with ONE block:
 <changes>[ ...array of changes... ]</changes>
   Before the block, write one or two sentences summarising what you will propose. Split the work into small changes that the user can accept or refuse one by one (one concern per change, ordered so that each change makes sense even if a later one is refused). A change must not depend on an earlier change of the same block unless unavoidable; if it does, say so in "why".
@@ -119,7 +122,7 @@ export function createAi(cfg) {
    * history : [{ role: 'user'|'assistant', content }] — le dernier message est celui de l'utilisateur.
    * Le diagramme à jour est joint au dernier message ; mode 'propose' force un bloc <changes>.
    */
-  function buildMessages({ xml, history, mode, selection }) {
+  function buildMessages({ xml, history, mode, selection, visible, voice }) {
     const msgs = [];
     for (const m of history) {
       const role = m.role === 'assistant' ? 'assistant' : 'user';
@@ -129,15 +132,18 @@ export function createAi(cfg) {
     if (!msgs.length || msgs[0].role !== 'user') msgs.unshift({ role: 'user', content: '(début de conversation)' });
     const last = msgs.at(-1);
     if (last.role !== 'user') throw new AiError('Le dernier message doit venir de l\'utilisateur.', 400);
-    const sel = selection?.length ? `\nÉléments sélectionnés dans l'éditeur : ${selection.map(s => `${s.name || '(sans nom)'} [${s.id}]`).join(', ')}\n` : '';
+    const fmt = list => list.map(s => `${s.name || '(sans nom)'} [${s.id}]`).join(', ');
+    const sel = selection?.length ? `\nÉléments sélectionnés dans l'éditeur : ${fmt(selection)}` : '';
+    const vis = visible?.length ? `\nÉléments visibles à l'écran : ${fmt(visible)}` : '';
     const propose = mode === 'propose' ? '\n\nMODE PROPOSITION : propose maintenant les modifications issues de notre échange, sous forme de bloc <changes>.' : '';
-    last.content = `Diagramme actuel :\n<diagram>\n${stripDi(xml)}\n</diagram>\n${sel}\n${last.content}${propose}`;
+    const spoken = voice ? '\n\nMODE VOCAL : ta réponse sera lue à voix haute. Réponds en 1 à 4 phrases courtes et naturelles, sans liste ni markdown, sans jamais prononcer d\'identifiant (ils vont seulement dans les balises focus). Avance une zone du diagramme à la fois, avec une balise focus, puis demande à l\'utilisateur ce qu\'il en pense ou s\'il veut continuer. S\'il te demande d\'appliquer, annonce brièvement les modifications puis donne le bloc <changes>.' : '';
+    last.content = `Diagramme actuel :\n<diagram>\n${stripDi(xml)}\n</diagram>\n${sel}${vis}\n\n${last.content}${propose}${spoken}`;
     return msgs;
   }
 
   /** Générateur de morceaux de texte. */
-  async function* chat({ xml, history, mode, selection }, signal) {
-    const messages = buildMessages({ xml, history, mode, selection });
+  async function* chat({ xml, history, mode, selection, visible, voice }, signal) {
+    const messages = buildMessages({ xml, history, mode, selection, visible, voice });
     const maxTokens = mode === 'propose' ? 16000 : 6000;
     const abort = AbortSignal.any([signal, AbortSignal.timeout(timeout)].filter(Boolean));
     const gen = provider === 'anthropic' ? streamAnthropic(SYSTEM_PROMPT, messages, maxTokens, abort) : streamOpenAi(SYSTEM_PROMPT, messages, maxTokens, abort);

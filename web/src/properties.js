@@ -100,7 +100,7 @@ export function createProperties(ctx, host) {
       const inEventSub = bo.$parent?.triggeredByEvent;
       const incoming = (bo.incoming || []).length;
       const outgoing = (bo.outgoing || []).length;
-      const isComp = bo.isForCompensation;
+      const isComp = bo.isForCompensation || (is(e, 'bpmn:BoundaryEvent') && bo.eventDefinitions?.some(d => is(d, 'bpmn:CompensateEventDefinition')));
       if (!incoming && !is(e, 'bpmn:StartEvent') && !is(e, 'bpmn:BoundaryEvent') && !isComp && !bo.triggeredByEvent && !(is(e, 'bpmn:IntermediateCatchEvent') && bo.eventDefinitions?.some(d => is(d, 'bpmn:LinkEventDefinition')))) {
         add(e, 'warn', 'aucun flux entrant : il ne sera jamais atteint.');
       }

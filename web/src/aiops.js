@@ -2,6 +2,7 @@
 // commande annulable, et la mise en page des nouveaux éléments est calculée par l'éditeur
 // (placement automatique, insertion sur un flux), pas par l'IA.
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
+import { createFocus } from './focus.js';
 
 const EVENT_DEFS = {
   timer: 'bpmn:TimerEventDefinition', message: 'bpmn:MessageEventDefinition', error: 'bpmn:ErrorEventDefinition',
@@ -27,7 +28,6 @@ export function createApplier(modeler) {
   const bpmnReplace = modeler.get('bpmnReplace');
   const autoPlace = modeler.get('autoPlace');
   const spaceTool = modeler.get('spaceTool');
-  const canvas = modeler.get('canvas');
   const commandStack = modeler.get('commandStack');
 
   const refs = new Map(); // ref proposé par l'IA → id réel
@@ -259,22 +259,8 @@ export function createApplier(modeler) {
     while (commandStack._stackIdx > mark && commandStack.canUndo()) commandStack.undo();
   }
 
-  /** Cadre la vue sur un ensemble d'éléments. */
-  function focus(idsToShow) {
-    const els = idsToShow.map(id => registry.get(refs.get(id) || id)).filter(e => e && e.type !== 'label');
-    if (!els.length) return;
-    let x1 = Infinity, y1 = Infinity, x2 = -Infinity, y2 = -Infinity;
-    for (const e of els) {
-      const pts = e.waypoints || [{ x: e.x, y: e.y }, { x: e.x + e.width, y: e.y + e.height }];
-      for (const p of pts) { x1 = Math.min(x1, p.x); y1 = Math.min(y1, p.y); x2 = Math.max(x2, p.x); y2 = Math.max(y2, p.y); }
-    }
-    const pad = 160;
-    const box = { x: x1 - pad, y: y1 - pad, width: x2 - x1 + 2 * pad, height: y2 - y1 + 2 * pad };
-    const { outer } = canvas.viewbox();
-    const scale = Math.min(1.4, outer.width / box.width, outer.height / box.height);
-    const cx = box.x + box.width / 2, cy = box.y + box.height / 2;
-    canvas.viewbox({ x: cx - outer.width / scale / 2, y: cy - outer.height / scale / 2, width: outer.width / scale, height: outer.height / scale });
-  }
+  const focuser = createFocus(modeler);
+  const focus = ids => focuser.show(ids.map(id => refs.get(id) || id), { maxZoom: 1.4, pad: 160 });
 
   return { apply, undoTo, focus, resolve: id => refs.get(id) || id, reset: () => refs.clear() };
 }

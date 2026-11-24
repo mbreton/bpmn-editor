@@ -1,0 +1,375 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"
+                  xmlns:bpmndi="http://www.omg.org/spec/BPMN/20100524/DI"
+                  xmlns:dc="http://www.omg.org/spec/DD/20100524/DC"
+                  xmlns:di="http://www.omg.org/spec/DD/20100524/DI"
+                  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                  id="Definitions_Delais"
+                  targetNamespace="http://example.com/bpmn/delais">
+
+  <bpmn:message id="Msg_Versement" name="1er versement reçu" />
+  <bpmn:error id="Err_DossierExpire" name="Dossier expiré" errorCode="DOSSIER_EXPIRE" />
+
+  <bpmn:process id="Process_Onboarding" name="Onboarding client — contraintes temporelles" isExecutable="true">
+
+    <bpmn:startEvent id="Start" name="Demande de souscription reçue">
+      <bpmn:outgoing>F1</bpmn:outgoing>
+    </bpmn:startEvent>
+
+    <bpmn:userTask id="Task_Valider" name="Valider la demande (étape X)">
+      <bpmn:documentation>Étape à partir de laquelle court le délai contractuel de 30 jours.</bpmn:documentation>
+      <bpmn:incoming>F1</bpmn:incoming>
+      <bpmn:outgoing>F2</bpmn:outgoing>
+    </bpmn:userTask>
+
+    <bpmn:scriptTask id="Task_Echeance" name="Calculer l'échéance (dueDate = now + 30j)" scriptFormat="javascript">
+      <bpmn:documentation>Le point de départ du délai est matérialisé dans les données : dueDate est réutilisée plus loin en timeDate. Remplacer par un calcul en jours ouvrés si la règle l'exige.</bpmn:documentation>
+      <bpmn:incoming>F2</bpmn:incoming>
+      <bpmn:outgoing>F3</bpmn:outgoing>
+      <bpmn:script>var d = new Date(); d.setDate(d.getDate() + 30); execution.setVariable("dueDate", d.toISOString());</bpmn:script>
+    </bpmn:scriptTask>
+
+    <!-- Sous-processus couvrant plusieurs étapes soumises au délai -->
+    <bpmn:subProcess id="Sub_Dossier" name="Constitution du dossier">
+      <bpmn:incoming>F3</bpmn:incoming>
+      <bpmn:outgoing>F4</bpmn:outgoing>
+
+      <bpmn:startEvent id="Sub_Start">
+        <bpmn:outgoing>S1</bpmn:outgoing>
+      </bpmn:startEvent>
+
+      <bpmn:userTask id="Task_KYC" name="Collecter les pièces KYC">
+        <bpmn:incoming>S1</bpmn:incoming>
+        <bpmn:outgoing>S2</bpmn:outgoing>
+      </bpmn:userTask>
+
+      <!-- Timer NON interrompant : relance quotidienne, 3 fois -->
+      <bpmn:boundaryEvent id="Timer_Relance" name="Toutes les 24h (x3)" attachedToRef="Task_KYC" cancelActivity="false">
+        <bpmn:outgoing>S5</bpmn:outgoing>
+        <bpmn:timerEventDefinition id="TED_Relance">
+          <bpmn:timeCycle xsi:type="bpmn:tFormalExpression">R3/P1D</bpmn:timeCycle>
+        </bpmn:timerEventDefinition>
+      </bpmn:boundaryEvent>
+
+      <bpmn:sendTask id="Task_Relancer" name="Relancer le client">
+        <bpmn:incoming>S5</bpmn:incoming>
+        <bpmn:outgoing>S6</bpmn:outgoing>
+      </bpmn:sendTask>
+
+      <bpmn:endEvent id="End_Relance" name="Relance envoyée">
+        <bpmn:incoming>S6</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <bpmn:userTask id="Task_Signer" name="Signer le contrat">
+        <bpmn:incoming>S2</bpmn:incoming>
+        <bpmn:outgoing>S3</bpmn:outgoing>
+      </bpmn:userTask>
+
+      <bpmn:serviceTask id="Task_Reserver" name="Réserver le contrat chez l'assureur">
+        <bpmn:incoming>S3</bpmn:incoming>
+        <bpmn:outgoing>S4</bpmn:outgoing>
+      </bpmn:serviceTask>
+
+      <!-- Compensation : comment défaire la réservation si le délai expire -->
+      <bpmn:boundaryEvent id="Comp_Reserver" attachedToRef="Task_Reserver">
+        <bpmn:compensateEventDefinition id="CED_Reserver" />
+      </bpmn:boundaryEvent>
+
+      <bpmn:serviceTask id="Task_Annuler" name="Annuler la réservation assureur" isForCompensation="true" />
+
+      <bpmn:association id="Assoc_Comp" associationDirection="One" sourceRef="Comp_Reserver" targetRef="Task_Annuler" />
+
+      <bpmn:endEvent id="Sub_End" name="Dossier complet">
+        <bpmn:incoming>S4</bpmn:incoming>
+      </bpmn:endEvent>
+
+      <!-- Sous-processus événementiel : échéance absolue calculée à l'étape X -->
+      <bpmn:subProcess id="EvtSub_Expiration" name="Échéance contractuelle" triggeredByEvent="true">
+        <bpmn:startEvent id="Timer_Echeance" name="À dueDate" isInterrupting="true">
+          <bpmn:outgoing>E1</bpmn:outgoing>
+          <bpmn:timerEventDefinition id="TED_Echeance">
+            <bpmn:timeDate xsi:type="bpmn:tFormalExpression">${dueDate}</bpmn:timeDate>
+          </bpmn:timerEventDefinition>
+        </bpmn:startEvent>
+
+        <bpmn:intermediateThrowEvent id="Throw_Comp" name="Compenser les étapes réalisées">
+          <bpmn:incoming>E1</bpmn:incoming>
+          <bpmn:outgoing>E2</bpmn:outgoing>
+          <bpmn:compensateEventDefinition id="CED_Throw" waitForCompletion="true" />
+        </bpmn:intermediateThrowEvent>
+
+        <bpmn:endEvent id="End_Erreur" name="Dossier expiré">
+          <bpmn:incoming>E2</bpmn:incoming>
+          <bpmn:errorEventDefinition id="EED_End" errorRef="Err_DossierExpire" />
+        </bpmn:endEvent>
+
+        <bpmn:sequenceFlow id="E1" sourceRef="Timer_Echeance" targetRef="Throw_Comp" />
+        <bpmn:sequenceFlow id="E2" sourceRef="Throw_Comp" targetRef="End_Erreur" />
+      </bpmn:subProcess>
+
+      <bpmn:sequenceFlow id="S1" sourceRef="Sub_Start" targetRef="Task_KYC" />
+      <bpmn:sequenceFlow id="S2" sourceRef="Task_KYC" targetRef="Task_Signer" />
+      <bpmn:sequenceFlow id="S3" sourceRef="Task_Signer" targetRef="Task_Reserver" />
+      <bpmn:sequenceFlow id="S4" sourceRef="Task_Reserver" targetRef="Sub_End" />
+      <bpmn:sequenceFlow id="S5" sourceRef="Timer_Relance" targetRef="Task_Relancer" />
+      <bpmn:sequenceFlow id="S6" sourceRef="Task_Relancer" targetRef="End_Relance" />
+    </bpmn:subProcess>
+
+    <!-- L'erreur remonte au parent, qui décide de la suite -->
+    <bpmn:boundaryEvent id="Err_Boundary" name="Dossier expiré" attachedToRef="Sub_Dossier">
+      <bpmn:outgoing>F5</bpmn:outgoing>
+      <bpmn:errorEventDefinition id="EED_Boundary" errorRef="Err_DossierExpire" />
+    </bpmn:boundaryEvent>
+
+    <bpmn:sendTask id="Task_Notifier" name="Notifier l'expiration au client">
+      <bpmn:incoming>F5</bpmn:incoming>
+      <bpmn:outgoing>F6</bpmn:outgoing>
+    </bpmn:sendTask>
+
+    <bpmn:endEvent id="End_Expire" name="Souscription expirée">
+      <bpmn:incoming>F6</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <!-- Course entre un événement externe et un délai -->
+    <bpmn:eventBasedGateway id="GW_Attente" name="Attendre le 1er versement">
+      <bpmn:incoming>F4</bpmn:incoming>
+      <bpmn:outgoing>F7</bpmn:outgoing>
+      <bpmn:outgoing>F8</bpmn:outgoing>
+    </bpmn:eventBasedGateway>
+
+    <bpmn:intermediateCatchEvent id="Catch_Versement" name="1er versement reçu">
+      <bpmn:incoming>F7</bpmn:incoming>
+      <bpmn:outgoing>F9</bpmn:outgoing>
+      <bpmn:messageEventDefinition id="MED_Versement" messageRef="Msg_Versement" />
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:intermediateCatchEvent id="Catch_Timer15j" name="15 jours écoulés">
+      <bpmn:incoming>F8</bpmn:incoming>
+      <bpmn:outgoing>F10</bpmn:outgoing>
+      <bpmn:timerEventDefinition id="TED_15j">
+        <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">P15D</bpmn:timeDuration>
+      </bpmn:timerEventDefinition>
+    </bpmn:intermediateCatchEvent>
+
+    <bpmn:serviceTask id="Task_Activer" name="Activer le compte courant">
+      <bpmn:incoming>F9</bpmn:incoming>
+      <bpmn:outgoing>F11</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="End_Actif" name="Compte actif">
+      <bpmn:incoming>F11</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:serviceTask id="Task_Cloturer" name="Clôturer sans versement">
+      <bpmn:incoming>F10</bpmn:incoming>
+      <bpmn:outgoing>F12</bpmn:outgoing>
+    </bpmn:serviceTask>
+
+    <bpmn:endEvent id="End_Cloture" name="Compte clôturé">
+      <bpmn:incoming>F12</bpmn:incoming>
+    </bpmn:endEvent>
+
+    <bpmn:sequenceFlow id="F1" sourceRef="Start" targetRef="Task_Valider" />
+    <bpmn:sequenceFlow id="F2" sourceRef="Task_Valider" targetRef="Task_Echeance" />
+    <bpmn:sequenceFlow id="F3" sourceRef="Task_Echeance" targetRef="Sub_Dossier" />
+    <bpmn:sequenceFlow id="F4" sourceRef="Sub_Dossier" targetRef="GW_Attente" />
+    <bpmn:sequenceFlow id="F5" sourceRef="Err_Boundary" targetRef="Task_Notifier" />
+    <bpmn:sequenceFlow id="F6" sourceRef="Task_Notifier" targetRef="End_Expire" />
+    <bpmn:sequenceFlow id="F7" sourceRef="GW_Attente" targetRef="Catch_Versement" />
+    <bpmn:sequenceFlow id="F8" sourceRef="GW_Attente" targetRef="Catch_Timer15j" />
+    <bpmn:sequenceFlow id="F9" sourceRef="Catch_Versement" targetRef="Task_Activer" />
+    <bpmn:sequenceFlow id="F10" sourceRef="Catch_Timer15j" targetRef="Task_Cloturer" />
+    <bpmn:sequenceFlow id="F11" sourceRef="Task_Activer" targetRef="End_Actif" />
+    <bpmn:sequenceFlow id="F12" sourceRef="Task_Cloturer" targetRef="End_Cloture" />
+
+    <bpmn:textAnnotation id="Note_Delai">
+      <bpmn:text>Le délai de 30 j démarre à l'étape X (dueDate calculée), pas à l'entrée du sous-processus.</bpmn:text>
+    </bpmn:textAnnotation>
+    <bpmn:association id="Assoc_Note" sourceRef="Note_Delai" targetRef="Task_Echeance" />
+  </bpmn:process>
+
+  <bpmndi:BPMNDiagram id="Diagram_1">
+    <bpmndi:BPMNPlane id="Plane_1" bpmnElement="Process_Onboarding">
+
+      <bpmndi:BPMNShape id="Start_di" bpmnElement="Start">
+        <dc:Bounds x="152" y="182" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="125" y="225" width="90" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Valider_di" bpmnElement="Task_Valider">
+        <dc:Bounds x="240" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Echeance_di" bpmnElement="Task_Echeance">
+        <dc:Bounds x="390" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Note_Delai_di" bpmnElement="Note_Delai">
+        <dc:Bounds x="300" y="40" width="200" height="54" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="Assoc_Note_di" bpmnElement="Assoc_Note">
+        <di:waypoint x="420" y="94" />
+        <di:waypoint x="434" y="160" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Sous-processus -->
+      <bpmndi:BPMNShape id="Sub_Dossier_di" bpmnElement="Sub_Dossier" isExpanded="true">
+        <dc:Bounds x="540" y="80" width="760" height="400" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Sub_Start_di" bpmnElement="Sub_Start">
+        <dc:Bounds x="570" y="162" width="36" height="36" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_KYC_di" bpmnElement="Task_KYC">
+        <dc:Bounds x="640" y="140" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Signer_di" bpmnElement="Task_Signer">
+        <dc:Bounds x="790" y="140" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Reserver_di" bpmnElement="Task_Reserver">
+        <dc:Bounds x="940" y="140" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Sub_End_di" bpmnElement="Sub_End">
+        <dc:Bounds x="1092" y="162" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1070" y="205" width="80" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Relancer_di" bpmnElement="Task_Relancer">
+        <dc:Bounds x="720" y="260" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Relance_di" bpmnElement="End_Relance">
+        <dc:Bounds x="852" y="282" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="828" y="325" width="84" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Annuler_di" bpmnElement="Task_Annuler">
+        <dc:Bounds x="1010" y="260" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Timer_Relance_di" bpmnElement="Timer_Relance">
+        <dc:Bounds x="672" y="202" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="590" y="240" width="80" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Comp_Reserver_di" bpmnElement="Comp_Reserver">
+        <dc:Bounds x="972" y="202" width="36" height="36" />
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="S1_di" bpmnElement="S1">
+        <di:waypoint x="606" y="180" /><di:waypoint x="640" y="180" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="S2_di" bpmnElement="S2">
+        <di:waypoint x="740" y="180" /><di:waypoint x="790" y="180" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="S3_di" bpmnElement="S3">
+        <di:waypoint x="890" y="180" /><di:waypoint x="940" y="180" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="S4_di" bpmnElement="S4">
+        <di:waypoint x="1040" y="180" /><di:waypoint x="1092" y="180" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="S5_di" bpmnElement="S5">
+        <di:waypoint x="690" y="238" /><di:waypoint x="690" y="300" /><di:waypoint x="720" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="S6_di" bpmnElement="S6">
+        <di:waypoint x="820" y="300" /><di:waypoint x="852" y="300" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="Assoc_Comp_di" bpmnElement="Assoc_Comp">
+        <di:waypoint x="990" y="238" /><di:waypoint x="990" y="300" /><di:waypoint x="1010" y="300" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Sous-processus événementiel -->
+      <bpmndi:BPMNShape id="EvtSub_Expiration_di" bpmnElement="EvtSub_Expiration" isExpanded="true">
+        <dc:Bounds x="580" y="360" width="320" height="100" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Timer_Echeance_di" bpmnElement="Timer_Echeance">
+        <dc:Bounds x="610" y="392" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="602" y="435" width="52" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Throw_Comp_di" bpmnElement="Throw_Comp">
+        <dc:Bounds x="700" y="392" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="672" y="435" width="92" height="20" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Erreur_di" bpmnElement="End_Erreur">
+        <dc:Bounds x="800" y="392" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="782" y="435" width="72" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="E1_di" bpmnElement="E1">
+        <di:waypoint x="646" y="410" /><di:waypoint x="700" y="410" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="E2_di" bpmnElement="E2">
+        <di:waypoint x="736" y="410" /><di:waypoint x="800" y="410" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Erreur sur bordure du sous-processus -->
+      <bpmndi:BPMNShape id="Err_Boundary_di" bpmnElement="Err_Boundary">
+        <dc:Bounds x="1200" y="462" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1244" y="490" width="72" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Notifier_di" bpmnElement="Task_Notifier">
+        <dc:Bounds x="1168" y="540" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Expire_di" bpmnElement="End_Expire">
+        <dc:Bounds x="1312" y="562" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1282" y="605" width="96" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNEdge id="F5_di" bpmnElement="F5">
+        <di:waypoint x="1218" y="498" /><di:waypoint x="1218" y="540" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F6_di" bpmnElement="F6">
+        <di:waypoint x="1268" y="580" /><di:waypoint x="1312" y="580" />
+      </bpmndi:BPMNEdge>
+
+      <!-- Passerelle événementielle -->
+      <bpmndi:BPMNShape id="GW_Attente_di" bpmnElement="GW_Attente">
+        <dc:Bounds x="1350" y="255" width="50" height="50" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1405" y="300" width="80" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Catch_Versement_di" bpmnElement="Catch_Versement">
+        <dc:Bounds x="1452" y="182" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1428" y="152" width="84" height="27" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Catch_Timer15j_di" bpmnElement="Catch_Timer15j">
+        <dc:Bounds x="1452" y="342" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1428" y="385" width="84" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Activer_di" bpmnElement="Task_Activer">
+        <dc:Bounds x="1540" y="160" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Actif_di" bpmnElement="End_Actif">
+        <dc:Bounds x="1702" y="182" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1688" y="225" width="64" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="Task_Cloturer_di" bpmnElement="Task_Cloturer">
+        <dc:Bounds x="1540" y="320" width="100" height="80" />
+      </bpmndi:BPMNShape>
+      <bpmndi:BPMNShape id="End_Cloture_di" bpmnElement="End_Cloture">
+        <dc:Bounds x="1702" y="342" width="36" height="36" />
+        <bpmndi:BPMNLabel><dc:Bounds x="1680" y="385" width="80" height="14" /></bpmndi:BPMNLabel>
+      </bpmndi:BPMNShape>
+
+      <bpmndi:BPMNEdge id="F1_di" bpmnElement="F1">
+        <di:waypoint x="188" y="200" /><di:waypoint x="240" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F2_di" bpmnElement="F2">
+        <di:waypoint x="340" y="200" /><di:waypoint x="390" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F3_di" bpmnElement="F3">
+        <di:waypoint x="490" y="200" /><di:waypoint x="540" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F4_di" bpmnElement="F4">
+        <di:waypoint x="1300" y="280" /><di:waypoint x="1350" y="280" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F7_di" bpmnElement="F7">
+        <di:waypoint x="1375" y="255" /><di:waypoint x="1375" y="200" /><di:waypoint x="1452" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F8_di" bpmnElement="F8">
+        <di:waypoint x="1375" y="305" /><di:waypoint x="1375" y="360" /><di:waypoint x="1452" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F9_di" bpmnElement="F9">
+        <di:waypoint x="1488" y="200" /><di:waypoint x="1540" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F10_di" bpmnElement="F10">
+        <di:waypoint x="1488" y="360" /><di:waypoint x="1540" y="360" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F11_di" bpmnElement="F11">
+        <di:waypoint x="1640" y="200" /><di:waypoint x="1702" y="200" />
+      </bpmndi:BPMNEdge>
+      <bpmndi:BPMNEdge id="F12_di" bpmnElement="F12">
+        <di:waypoint x="1640" y="360" /><di:waypoint x="1702" y="360" />
+      </bpmndi:BPMNEdge>
+
+    </bpmndi:BPMNPlane>
+  </bpmndi:BPMNDiagram>
+</bpmn:definitions>
