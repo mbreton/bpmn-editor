@@ -1,10 +1,12 @@
-# Utilisable tel quel dans Coolify (type « Docker Compose ») ou en local : docker compose up -d
+# Coolify (type « Docker Compose ») : le proxy de Coolify joint le conteneur sur son port interne 3000,
+# aucun port n'est publié sur l'hôte (évite les conflits avec un autre service déjà sur 3000).
+# En local : docker compose -f docker-compose.yml -f docker-compose.local.yml up -d  → http://localhost:3000
 services:
   bpmn-editor:
     build: .
     restart: unless-stopped
-    ports:
-      - "3000:3000"
+    expose:
+      - "3000"
     environment:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD requis}
       SESSION_SECRET: ${SESSION_SECRET:-}

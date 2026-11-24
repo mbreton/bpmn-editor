@@ -28,7 +28,7 @@ const app = await buildApp({
 });
 
 const port = Number(env.PORT || 3000);
-await app.listen({ port, host: env.HOST || '0.0.0.0' });
+await app.listen({ port, host: env.LISTEN_HOST || '0.0.0.0' });
 console.log(`[bpmn-editor] en écoute sur le port ${port}${env.LLM_API_KEY || env.ANTHROPIC_API_KEY || env.LLM_BASE_URL ? ' · assistant IA activé' : ''}`);
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => app.close().then(() => process.exit(0)));

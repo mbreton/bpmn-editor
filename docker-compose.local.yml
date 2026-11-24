@@ -1,0 +1,5 @@
+# Publie le port sur la machine locale (inutile sous Coolify).
+services:
+  bpmn-editor:
+    ports:
+      - "3000:3000"

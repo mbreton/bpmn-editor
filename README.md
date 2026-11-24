@@ -30,7 +30,7 @@ Tests de l'API : `npm test`.
 
 1. **New resource → Public/Private repository** : pointer sur ce dépôt, branche `main`.
 2. Build pack : **Dockerfile** (ou **Docker Compose** avec le `docker-compose.yml` fourni).
-3. Port exposé : `3000`. Associer un domaine. Coolify fournit le HTTPS.
+3. **Ports Exposes : `3000`**. C'est le port interne vers lequel le proxy de Coolify envoie le trafic, inutile de publier un port sur l'hôte. Associez un domaine (en Docker Compose : `https://votre-domaine:3000` dans le champ Domains du service, le `:3000` désignant le port interne). Coolify fournit le HTTPS.
 4. **Stockage persistant** : monter un volume sur `/data`. La base SQLite s'y trouve, avec les diagrammes, les versions et les liens. C'est le seul élément à sauvegarder.
 5. Variables d'environnement (voir `.env.example`) :
 
@@ -44,6 +44,7 @@ Tests de l'API : `npm test`.
 | `LLM_BASE_URL` | non | URL de l'API, par ex. `https://api.scaleway.ai/v1` ou l'URL d'un proxy LiteLLM. |
 | `AI_RATE_LIMIT_PER_HOUR` | non | Nombre d'appels IA par heure et par adresse IP (40 par défaut). |
 | `COOKIE_SECURE` | non | `true` par défaut en production. Mettre `false` seulement si le site est servi en HTTP. |
+| `LISTEN_HOST` | non | Interface d'écoute, `0.0.0.0` par défaut. |
 | `TRUST_PROXY` | non | `true` par défaut, adapté derrière le proxy de Coolify. Mettre `false` si le conteneur est exposé directement. |
 
 Le healthcheck répond sur `GET /healthz`.
