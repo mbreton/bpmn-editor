@@ -57,8 +57,19 @@ export function createSharing(ctx, host) {
   });
 
   async function copy(token) {
-    try { await navigator.clipboard.writeText(linkOf(token)); toast('Lien copié dans le presse-papiers.'); }
-    catch { toast('Copie impossible : sélectionnez le lien et copiez-le.', 'error'); }
+    const text = linkOf(token);
+    try {
+      if (navigator.clipboard) await navigator.clipboard.writeText(text);
+      else { // API presse-papiers absente hors HTTPS : repli sur execCommand
+        const t = Object.assign(document.createElement('textarea'), { value: text });
+        t.style.position = 'fixed'; t.style.opacity = '0';
+        document.body.append(t); t.select();
+        const ok = document.execCommand('copy');
+        t.remove();
+        if (!ok) throw new Error('copy');
+      }
+      toast('Lien copié dans le presse-papiers.');
+    } catch { toast('Copie impossible : sélectionnez le lien et copiez-le.', 'error'); }
   }
 
   ctx.on('tab', t => { if (t === 'share') load(); });

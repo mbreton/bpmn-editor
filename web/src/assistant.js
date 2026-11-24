@@ -260,7 +260,8 @@ export function createAssistant(ctx, host) {
   // ---------- dictée (Web Speech API : Chrome, Edge, Safari) ----------
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let rec = null;
-  if (!SR) {
+  if (!SR || !window.isSecureContext) {
+    // Le micro n'est accessible qu'en HTTPS : inutile d'afficher un bouton qui échouerait.
     micBtn.hidden = true;
   } else {
     micBtn.addEventListener('click', () => {

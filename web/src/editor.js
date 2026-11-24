@@ -20,9 +20,15 @@ import { createSharing } from './sharing.js';
 const RENEW_MS = 30_000;
 const POLL_MS = 20_000;
 
+// crypto.randomUUID n'existe qu'en contexte sécurisé (HTTPS ou localhost) : getRandomValues marche partout.
+function randomId() {
+  const b = crypto.getRandomValues(new Uint8Array(16));
+  return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
+}
+
 function holderId() {
   let id = sessionStorage.getItem('bpmn.holder');
-  if (!id) { id = crypto.randomUUID(); sessionStorage.setItem('bpmn.holder', id); }
+  if (!id) { id = randomId(); sessionStorage.setItem('bpmn.holder', id); }
   return id;
 }
 
