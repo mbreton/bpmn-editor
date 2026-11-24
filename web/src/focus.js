@@ -52,7 +52,7 @@ export function createFocus(modeler) {
     return true;
   }
 
-  /** Éléments actuellement visibles à l'écran (pour donner le contexte à l'IA). */
+  /** Éléments actuellement visibles à l'écran (pour décrire à Claude ce qui est à l'écran). */
   function visible() {
     const vb = canvas.viewbox();
     return registry.filter(e => e.type !== 'label' && !e.waypoints && e.parent && e.businessObject?.$type !== 'bpmn:Process'

@@ -1,6 +1,6 @@
 // Explorateur de parcours : à chaque situation, toutes les suites que le diagramme autorise.
-// On en choisit une, on peut revenir en arrière pour essayer les autres, et demander à l'IA
-// quand le diagramme ne propose pas ce qu'on attendait.
+// On en choisit une et on peut revenir en arrière pour essayer les autres. Claude peut mener la
+// même exploration via le connecteur (outil explore) : elle est rejouée ici.
 import { h, esc } from './dom.js';
 import { createWalker } from '../../shared/pathwalker.js';
 import { createFocus } from './focus.js';
@@ -163,21 +163,6 @@ export function createExplorer(ctx, { button, bar }) {
       ol.append(li);
     }
     if (!state.log.length) logEl.hidden = true;
-
-    // Lien avec l'assistant
-    const foot = ui.querySelector('.ex-foot');
-    if (ctx.cfg.ai && state.started) {
-      const b = h('<button class="btn small" type="button">Ce n\'est pas ce que j\'attendais…</button>');
-      b.title = 'Ouvre l\'assistant avec ce parcours et les suites possibles, pour discuter de l\'écart et corriger le diagramme';
-      b.addEventListener('click', () => ctx.discuss?.({
-        prefill: 'À cette étape du parcours, je m\'attendais à ',
-        context: walker.describe()
-      }));
-      foot.append(b);
-      const q = h('<button class="btn small ghost" type="button">Expliquer cette situation</button>');
-      q.addEventListener('click', () => ctx.discuss?.({ send: 'Explique-moi la situation actuelle de ce parcours et pourquoi le diagramme propose ces suites. Signale ce qui te semble incohérent.', context: walker.describe() }));
-      foot.append(q);
-    }
 
     bar.replaceChildren(ui);
   }

@@ -30,14 +30,6 @@ const app = await buildApp({
   sessionSecret: env.SESSION_SECRET,
   secureCookies: env.COOKIE_SECURE === 'true' ? true : env.COOKIE_SECURE === 'false' ? false : 'auto',
   trustProxy: trust ? (trust === 'true' ? true : trust === 'false' ? false : trust) : true,
-  aiRateLimit: env.AI_RATE_LIMIT_PER_HOUR ? Number(env.AI_RATE_LIMIT_PER_HOUR) : undefined,
-  ai: {
-    provider: env.LLM_PROVIDER || 'anthropic',
-    apiKey: env.LLM_API_KEY || env.ANTHROPIC_API_KEY,
-    model: env.LLM_MODEL,
-    baseUrl: env.LLM_BASE_URL,
-    timeoutMs: env.LLM_TIMEOUT_MS ? Number(env.LLM_TIMEOUT_MS) : undefined
-  },
   logger: { level: env.LOG_LEVEL || 'warn' }
 });
 
@@ -45,7 +37,6 @@ const port = Number(env.PORT || 3000);
 await app.listen({ port, host: env.LISTEN_HOST || '0.0.0.0' });
 console.log(`[bpmn-editor] en écoute sur le port ${port}`
   + ` · administrateur : ${env.ADMIN_PASSWORD ? `« ${env.ADMIN_EMAIL || 'admin'} » (mot de passe de ${env.ADMIN_PASSWORD.length} caractères)` : 'non configuré'}`
-  + ` · dépôt Git : ${env.GIT_REMOTE_URL ? redact(env.GIT_REMOTE_URL) : 'local uniquement'}`
-  + (env.LLM_API_KEY || env.ANTHROPIC_API_KEY || env.LLM_BASE_URL ? ' · assistant IA activé' : ''));
+  + ` · dépôt Git : ${env.GIT_REMOTE_URL ? redact(env.GIT_REMOTE_URL) : 'local uniquement'}`);
 
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => app.close().then(() => process.exit(0)));

@@ -5,7 +5,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
 import { BpmnModdle } from 'bpmn-moddle';
-import { OPS_SPEC } from './ai.js';
+import { OPS_SPEC } from './ops-spec.js';
 import { summarize } from '../shared/summary.js';
 import { formatIssue } from '../shared/coherence.js';
 import { createWalker } from '../shared/pathwalker.js';

@@ -1,5 +1,5 @@
 // Résumé textuel d'un diagramme BPMN (modèle bpmn-moddle) : structure, événements, flux, et
-// le contrôle de cohérence est dans coherence.js. C'est ce que lit l'IA via le MCP, plus compact et plus clair que le XML.
+// le contrôle de cohérence est dans coherence.js. C'est ce que lit Claude via le MCP, plus compact et plus clair que le XML.
 import { TYPE_LABELS, DEF_LABELS, explainIso } from './i18n.js';
 
 const is = (bo, type) => !!bo && (bo.$instanceOf ? bo.$instanceOf(type) : bo.$type === type);

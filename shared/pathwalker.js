@@ -401,7 +401,7 @@ export function createWalker(definitions) {
     },
     undo() { if (past.length) s = past.pop(); return current(); },
     reset() { s = fresh(); past.length = 0; return current(); },
-    /** Résumé textuel du parcours (pour l'assistant IA). */
+    /** Résumé textuel du parcours (pour Claude, outil explore). */
     describe() {
       const c = current();
       return [

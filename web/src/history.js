@@ -29,7 +29,7 @@ export function createHistory(ctx, host) {
     const b = e.target.closest('[data-sha]');
     if (!b) return;
     const sha = b.dataset.sha;
-    if (ctx.previewing && viewing === null) { toast('Terminez d\'abord la revue de l\'assistant en cours.', 'error'); return; }
+    if (ctx.previewing && viewing === null) { toast('Revenez d\'abord au brouillon.', 'error'); return; }
     if (sha === ctx.rev && viewing === null) return;
     if (sha === ctx.rev) return close();
     await show(sha);

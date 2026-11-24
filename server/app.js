@@ -7,7 +7,6 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { openDb } from './db.js';
 import { createAuth } from './auth.js';
-import { createAi, AiError } from './ai.js';
 import { createGitStore, GitError } from './git.js';
 import { createDiagrams } from './diagrams.js';
 import { checkBpmn } from './validate.js';
@@ -26,7 +25,6 @@ export async function buildApp(config) {
   const log = config.logger ? app.log : { info() {}, error() {}, warn() {} };
   const db = openDb(config.dbFile);
   const auth = createAuth({ db, sessionSecret: config.sessionSecret, secureCookies: config.secureCookies ?? 'auto' });
-  const ai = createAi(config.ai || {});
   const git = createGitStore({ dir: config.gitDir, remote: config.gitRemote, branch: config.gitBranch || 'main', subdir: config.gitSubdir || 'diagrams', log });
   const diagrams = createDiagrams({ db, git });
   const hub = createHub({ log });
@@ -92,7 +90,6 @@ export async function buildApp(config) {
     return {
       user: u ? { id: u.id, name: u.name, email: u.email, role: u.role } : null,
       pendingUsers: u?.role === 'admin' ? db.countPending() : undefined,
-      ai: ai.enabled ? { model: ai.model, provider: ai.provider } : null,
       git: { remote: !!config.gitRemote, branch: git.status.branch }
     };
   });
@@ -373,46 +370,6 @@ export async function buildApp(config) {
     } catch (e) {
       if (e instanceof GitError) return fail(reply, 404, e.message);
       return gitFail(reply, e);
-    }
-  });
-
-  // ---------- assistant IA (réponse en flux) ----------
-  app.post('/api/diagrams/:id/chat', { config: { rateLimit: { max: config.aiRateLimit ?? 60, timeWindow: '1 hour' } } }, async (req, reply) => {
-    const u = requireUser(req, reply); if (!u) return;
-    if (!ai.enabled) return fail(reply, 503, 'Assistant IA non configuré sur ce serveur.');
-    const { xml, history, mode, selection, visible, voice } = req.body || {};
-    if (!isXml(xml)) return fail(reply, 400, 'XML BPMN invalide ou trop volumineux.');
-    if (!Array.isArray(history) || history.length < 1 || history.length > 60) return fail(reply, 400, 'Historique de conversation invalide.');
-    for (const m of history) if (!m || !['user', 'assistant'].includes(m.role) || !str(m.content, 40000)) return fail(reply, 400, 'Message invalide.');
-    const refs = (list, max) => Array.isArray(list) ? list.slice(0, max).filter(s => s && typeof s.id === 'string').map(s => ({ id: s.id.slice(0, 100), name: String(s.name || '').slice(0, 200) })) : [];
-    const sel = refs(selection, 20), vis = refs(visible, 40);
-
-    reply.hijack();
-    const res = reply.raw;
-    res.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache, no-transform', 'x-accel-buffering': 'no', connection: 'keep-alive' });
-    const send = ev => res.write(`data: ${JSON.stringify(ev)}\n\n`);
-    const ac = new AbortController();
-    res.on('close', () => ac.abort());
-    const heartbeat = setInterval(() => res.write(': ping\n\n'), 15000);
-
-    const elements = (xml.match(/<(\w+:)?(task|userTask|serviceTask|scriptTask|sendTask|receiveTask|manualTask|businessRuleTask|callActivity|subProcess|startEvent|endEvent|intermediateCatchEvent|intermediateThrowEvent|boundaryEvent|exclusiveGateway|parallelGateway|inclusiveGateway|eventBasedGateway)\b/g) || []).length;
-    send({ type: 'status', text: `Diagramme transmis au modèle ${ai.model} (${elements} éléments)…` });
-    let chars = 0;
-    try {
-      for await (const text of ai.chat({ xml, history, mode: mode === 'propose' ? 'propose' : 'chat', selection: sel, visible: vis, voice: voice === true }, ac.signal)) {
-        if (chars === 0) send({ type: 'status', text: 'Le modèle rédige sa réponse…' });
-        chars += text.length;
-        send({ type: 'delta', text });
-      }
-      send({ type: 'done' });
-    } catch (e) {
-      if (!ac.signal.aborted || e.name === 'TimeoutError') {
-        log.error(e);
-        send({ type: 'error', message: e instanceof AiError ? e.message : e.name === 'TimeoutError' ? 'L\'IA a mis trop de temps à répondre.' : 'Erreur lors de l\'appel à l\'IA.' });
-      }
-    } finally {
-      clearInterval(heartbeat);
-      res.end();
     }
   });
 

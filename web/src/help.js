@@ -34,7 +34,7 @@ export function createHelp(ctx, host) {
     const hits = index.filter(({ text }) => words.every(w => text.includes(w))).map(x => x.e);
     list.replaceChildren();
     if (!hits.length) {
-      list.append(h('<p class="muted">Aucun composant ne correspond. Essayez un autre mot, ou décrivez le besoin à l\'assistant IA.</p>'));
+      list.append(h('<p class="muted">Aucun composant ne correspond. Essayez un autre mot, ou décrivez le besoin à Claude.</p>'));
       return;
     }
     for (const cat of Object.keys(CATS)) {
@@ -65,11 +65,6 @@ export function createHelp(ctx, host) {
     if (entry.insert) {
       const b = h('<button class="btn small primary" type="button">Ajouter au diagramme</button>');
       b.addEventListener('click', ev => insert(entry, ev));
-      actions.append(b);
-    }
-    if (entry.ask && ctx.cfg.ai && ctx.canEdit) {
-      const b = h('<button class="btn small" type="button">Demander à l\'assistant</button>');
-      b.addEventListener('click', () => ctx.ask?.(entry.ask));
       actions.append(b);
     }
     d.addEventListener('toggle', () => {

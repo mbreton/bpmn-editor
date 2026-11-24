@@ -9,7 +9,6 @@ import { api } from './api.js';
 import { $, $$, esc, fmtTime, toast, dialog, download, safeFilename } from './dom.js';
 import { TranslateModule } from '../../shared/i18n.js';
 import { createProperties } from './properties.js';
-import { createAssistant } from './assistant.js';
 import { createHelp } from './help.js';
 import { createExplorer } from './explorer.js';
 import { createHistory } from './history.js';
@@ -82,13 +81,11 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
         <nav class="tabs" role="tablist">
           <button role="tab" data-tab="props" aria-selected="true">Propriétés</button>
           <button role="tab" data-tab="checks">Contrôles</button>
-          <button role="tab" data-tab="ai" title="Assistant IA intégré"${cfg.ai ? '' : ' hidden'}>Assistant</button>
           <button role="tab" data-tab="help">Aide</button>
           <button role="tab" data-tab="history">Historique</button>
         </nav>
         <section class="tab-body" data-panel="props"></section>
         <section class="tab-body" data-panel="checks" hidden></section>
-        <section class="tab-body" data-panel="ai" hidden></section>
         <section class="tab-body" data-panel="help" hidden></section>
         <section class="tab-body" data-panel="history" hidden></section>
       </aside>
@@ -124,7 +121,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       applyLock();
       return r;
     },
-    /** Une modification faite hors de la pile de commandes (revue IA acceptée…) : sauvegarde du brouillon. */
+    /** Une modification faite hors de la pile de commandes (ex. remise d'une ancienne version) : sauvegarde du brouillon. */
     markDirty(label) { scheduleSave(label); },
     check: diagram.check || null,
     setCheck(c) { if (!c) return; ctx.check = c; refreshCheck(); ctx.emit('check', c); },
@@ -338,7 +335,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   }
 
   async function stopEditing() {
-    if (ctx.previewing) ctx.emit('editing', false); // termine une revue IA ou une consultation de version
+    if (ctx.previewing) ctx.emit('editing', false); // termine la consultation d'une ancienne version
     await flushPending();
     stopEditingLocal();
     await api.unlock(id, holder).catch(() => {});
@@ -450,7 +447,6 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   const panels = [
     createProperties(ctx, $('[data-panel=props]', root)),
     createChecks(ctx, $('[data-panel=checks]', root), { tabButton: $('[data-tab=checks]', root) }),
-    createAssistant(ctx, $('[data-panel=ai]', root)),
     createHelp(ctx, $('[data-panel=help]', root)),
     createHistory(ctx, $('[data-panel=history]', root)),
     explorer
@@ -469,7 +465,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       return;
     }
     if (m.type === 'draft') {
-      if (ctx.previewing) return; // revue ou consultation en cours : on recharge à la sortie
+      if (ctx.previewing) return; // consultation d'une version en cours : on recharge à la sortie
       await saving;
       await ctx.loadDraft(m.xml, m.draft, m.check); // le serveur fait foi (annulation, réorganisation, autre page)
       if (m.label) toast(m.source === 'mcp' ? m.label.replace(/^(Annulé|Rétabli)/, 'Claude · $1') : `${m.by} · ${m.label}`);
@@ -491,7 +487,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
 
   /** Modifications demandées par Claude via le connecteur : appliquées, montrées, sauvegardées. */
   async function applyFromClaude(changes) {
-    if (ctx.previewing) return { ok: false, error: 'L\'utilisateur consulte une ancienne version ou examine une proposition de l\'assistant intégré : réessayez dans un instant.' };
+    if (ctx.previewing) return { ok: false, error: 'L\'utilisateur consulte une ancienne version : réessayez quand il est revenu au brouillon.' };
     if (ctx.simulating) $('#sim', root).click();
     if (!ctx.editing) {
       const r = await api.lock(id, holder).catch(e => ({ acquired: false, lock: e.body?.lock }));

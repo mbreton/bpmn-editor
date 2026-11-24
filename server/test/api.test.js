@@ -1,6 +1,5 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -14,34 +13,18 @@ const git = (dir, ...args) => execFileSync('git', ['-C', dir, ...args], { encodi
 const remote = join(tmp, 'remote.git');
 execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
 
-// Faux fournisseur LLM (API Anthropic en streaming SSE).
-const llmCalls = [];
-const llm = createServer((req, res) => {
-  let b = '';
-  req.on('data', c => { b += c; });
-  req.on('end', () => {
-    llmCalls.push(JSON.parse(b));
-    res.writeHead(200, { 'content-type': 'text/event-stream' });
-    for (const t of ['Bonjour, ', 'je regarde le diagramme.']) {
-      res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', delta: { type: 'text_delta', text: t } })}\n\n`);
-    }
-    res.end('event: message_stop\ndata: {"type":"message_stop"}\n\n');
-  });
-});
-
 let app;
 const ADMIN = { email: 'admin@test', password: 'admin-pass', name: 'Admin' };
 const config = (over = {}) => ({
   dbFile: join(tmp, 'db.sqlite'), gitDir: join(tmp, 'repo'), gitRemote: remote, gitSyncSeconds: 0,
   admin: ADMIN, secureCookies: 'auto',
-  ai: { provider: 'anthropic', apiKey: 'k', baseUrl: `http://127.0.0.1:${llm.address().port}` }, ...over
+  ...over
 });
 
 before(async () => {
-  await new Promise(r => llm.listen(0, r));
   app = await buildApp(config());
 });
-after(async () => { await app.close(); llm.close(); rmSync(tmp, { recursive: true, force: true }); });
+after(async () => { await app.close(); rmSync(tmp, { recursive: true, force: true }); });
 
 const call = (method, url, { body, cookie, headers = {} } = {}) =>
   app.inject({ method, url, payload: body, headers: { ...(cookie ? { cookie } : {}), ...headers } });
@@ -192,25 +175,6 @@ test('suppression réservée à l\'administrateur', async () => {
 test('import : XML invalide refusé', async () => {
   const r = await call('POST', '/api/diagrams', { cookie: aliceCookie, body: { name: 'X', xml: '<bpmn:definitions xmlns:bpmn="http://www.omg.org/spec/BPMN/20100524/MODEL"><oops' } });
   assert.equal(r.statusCode, 400);
-});
-
-test('assistant : réponse en flux, diagramme sans DI joint au dernier message', async () => {
-  const xml = emptyDiagram('IA');
-  const r = await call('POST', `/api/diagrams/${diagramId}/chat`, { cookie: aliceCookie, body: {
-    xml, mode: 'chat', selection: [{ id: 'StartEvent_1', name: 'Début' }],
-    history: [{ role: 'user', content: 'Que penses-tu du diagramme ?' }, { role: 'assistant', content: 'Il est court.' }, { role: 'user', content: 'Propose une suite' }]
-  } });
-  assert.equal(r.statusCode, 200);
-  const events = r.body.split('\n\n').filter(l => l.startsWith('data:')).map(l => JSON.parse(l.slice(5)));
-  assert.equal(events.filter(e => e.type === 'delta').map(e => e.text).join(''), 'Bonjour, je regarde le diagramme.');
-  assert.equal(events.at(-1).type, 'done');
-  const sent = llmCalls.at(-1);
-  assert.equal(sent.stream, true);
-  assert.equal(sent.messages.length, 3);
-  assert.match(sent.messages[2].content, /<diagram>/);
-  assert.doesNotMatch(sent.messages[2].content, /BPMNDiagram/, 'la DI est retirée');
-  assert.match(sent.messages[2].content, /StartEvent_1/);
-  assert.doesNotMatch(sent.messages[0].content, /<diagram>/, 'le diagramme n\'est joint qu\'au dernier message');
 });
 
 test('migration depuis l\'ancien stockage SQLite vers Git', async () => {

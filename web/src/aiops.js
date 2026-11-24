@@ -1,6 +1,6 @@
-// Applique les opérations proposées par l'IA avec les services bpmn-js : chaque opération est une
+// Applique les opérations demandées par Claude (connecteur MCP) avec les services bpmn-js : chaque opération est une
 // commande annulable, et la mise en page des nouveaux éléments est calculée par l'éditeur
-// (placement automatique, insertion sur un flux), pas par l'IA.
+// (placement automatique, insertion sur un flux), pas par Claude.
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { createFocus } from './focus.js';
 
@@ -30,7 +30,7 @@ export function createApplier(modeler) {
   const spaceTool = modeler.get('spaceTool');
   const commandStack = modeler.get('commandStack');
 
-  const refs = new Map(); // ref proposé par l'IA → id réel
+  const refs = new Map(); // ref proposé par Claude → id réel
 
   function get(id, what = 'élément') {
     if (typeof id !== 'string') throw new OpError(`${what} manquant`);
@@ -420,19 +420,3 @@ export function createApplier(modeler) {
   return { apply, undoTo, focus, resolve: id => refs.get(id) || id, reset: () => refs.clear() };
 }
 
-/** Extrait et lit le bloc <changes>…</changes> d'une réponse. */
-export function parseChanges(text) {
-  const m = /<changes>([\s\S]*?)(<\/changes>|$)/i.exec(text || '');
-  if (!m) return null;
-  let raw = m[1].trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
-  try {
-    const arr = JSON.parse(raw);
-    return Array.isArray(arr) ? arr.filter(c => c && typeof c === 'object') : null;
-  } catch {
-    // Virgules finales tolérées.
-    try { return JSON.parse(raw.replace(/,\s*([\]}])/g, '$1')); } catch { return { error: 'Les modifications proposées sont illisibles (JSON invalide).' }; }
-  }
-}
-
-/** Texte affichable : la réponse sans le bloc de modifications. */
-export const withoutChanges = text => String(text || '').replace(/<changes>[\s\S]*?(<\/changes>|$)/i, '').trim();
