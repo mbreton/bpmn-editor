@@ -1,0 +1,20 @@
+# Utilisable tel quel dans Coolify (type « Docker Compose ») ou en local : docker compose up -d
+services:
+  bpmn-editor:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD requis}
+      SESSION_SECRET: ${SESSION_SECRET:-}
+      LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      AI_RATE_LIMIT_PER_HOUR: ${AI_RATE_LIMIT_PER_HOUR:-40}
+    volumes:
+      - bpmn-data:/data
+
+volumes:
+  bpmn-data:
