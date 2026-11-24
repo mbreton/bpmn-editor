@@ -1,9 +1,15 @@
-// Conversation vocale dans le navigateur : reconnaissance continue (Web Speech API), envoi
-// automatique après une pause, lecture des réponses phrase par phrase au fil du flux, avec
-// déclenchement des balises <focus> au moment où la phrase est prononcée.
+// Conversation vocale dans le navigateur, avec prise de parole naturelle :
+// le micro reste ouvert pendant que l'IA parle ; dès que l'utilisateur parle, la voix de l'IA
+// se suspend puis s'arrête, et ce que l'utilisateur dit devient son message.
+//
+// Pour ne pas confondre l'utilisateur avec la voix de l'IA captée par le micro (sans casque),
+// chaque transcription entendue pendant que l'IA parle est comparée à ce qu'elle est en train
+// de dire : si les mots correspondent, c'est un écho et on l'ignore.
 
 const FOCUS_RE = /<focus\s+ids="([^"]*)"\s*\/?>/gi;
-const SILENCE_MS = 1300;
+const SILENCE_MS = 1300;     // pause qui termine une prise de parole
+const DUCK_MS = 180;         // durée de voix détectée avant de suspendre la synthèse
+const DUCK_RELEASE_MS = 1100;// sans confirmation de la reconnaissance, on reprend la lecture
 
 /** Texte prononçable : sans balises, sans markdown, sans identifiants techniques. */
 export function speakable(text) {
@@ -19,6 +25,21 @@ export function speakable(text) {
     .trim();
 }
 
+const words = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9' ]+/g, ' ').split(/\s+/).filter(w => w.length > 1);
+
+/**
+ * Vrai si `heard` ressemble à ce que l'IA vient de dire (écho du haut-parleur).
+ * Exporté pour les tests.
+ */
+export function isEcho(heard, spoken) {
+  const h = words(heard);
+  if (!h.length) return true;
+  const ref = new Set(words(spoken));
+  if (!ref.size) return false;
+  const hits = h.filter(w => ref.has(w)).length;
+  return hits / h.length >= 0.6;
+}
+
 export function voiceSupport() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!window.isSecureContext) return { ok: false, reason: 'La conversation vocale nécessite HTTPS (le navigateur refuse le micro sur une page en HTTP).' };
@@ -27,15 +48,12 @@ export function voiceSupport() {
   return { ok: true, SR };
 }
 
-export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
+export function createVoice({ onUtterance, onState, onFocus, onTranscript, onBargeIn }) {
   const support = voiceSupport();
   if (!support.ok) return { supported: false, reason: support.reason };
 
   let active = false;
-  let rec = null;
-  let listening = false;
-  let silenceTimer = null;
-  let heard = '';
+  let phase = 'off';        // listening | thinking | speaking | off
   let voice = null;
 
   // ---------- synthèse ----------
@@ -51,18 +69,29 @@ export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
   let streamDone = true;
   let consumed = 0;
   let afterSpeech = null;
+  let recentSpoken = [];    // dernières phrases lues (pour reconnaître l'écho)
+  let generation = 0;       // invalide les callbacks d'une réponse interrompue
+  let lastSpokeAt = 0;      // fin de la dernière phrase lue (l'écho arrive avec un peu de retard)
+  const ECHO_GRACE_MS = 2500;
+  /** Vide la file de synthèse (resume d'abord : Chrome resterait en pause après un cancel). */
+  const hush = () => { try { speechSynthesis.resume(); } catch { /* */ } speechSynthesis.cancel(); };
+
+  const setState = s => { phase = s; onState?.(s); };
+  const aiTalking = () => pending > 0 || !streamDone;
 
   function utter(text, focusIds) {
     const t = speakable(text);
-    if (!t && !focusIds?.length) return;
-    if (!t) { onFocus?.(focusIds); return; }
+    if (!t) { if (focusIds?.length) onFocus?.(focusIds); return; }
+    const gen = generation;
     const u = new SpeechSynthesisUtterance(t);
     u.lang = 'fr-FR';
     if (voice) u.voice = voice;
     u.rate = 1.05;
     pending++;
-    u.onstart = () => { setState('speaking'); if (focusIds?.length) onFocus?.(focusIds); };
-    const done = () => { pending = Math.max(0, pending - 1); maybeIdle(); };
+    recentSpoken.push(t);
+    if (recentSpoken.length > 4) recentSpoken.shift();
+    u.onstart = () => { if (gen !== generation) return; setState('speaking'); if (focusIds?.length) onFocus?.(focusIds); };
+    const done = () => { lastSpokeAt = Date.now(); if (gen !== generation) return; pending = Math.max(0, pending - 1); maybeIdle(); };
     u.onend = done; u.onerror = done;
     speechSynthesis.speak(u);
   }
@@ -70,7 +99,8 @@ export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
   function maybeIdle() {
     if (pending || !streamDone || !active) return;
     const cb = afterSpeech; afterSpeech = null;
-    if (cb) cb(); else listen();
+    if (phase !== 'user') setState('listening');
+    if (cb) cb();
   }
 
   /** Découpe le texte reçu en phrases complètes et les met dans la file de lecture. */
@@ -78,7 +108,6 @@ export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
     const text = full.replace(/<changes>[\s\S]*$/i, '');
     let rest = text.slice(consumed);
     for (;;) {
-      // Ne pas couper au milieu d'une balise <focus …> en cours de réception.
       const openTag = rest.lastIndexOf('<');
       const safe = openTag >= 0 && rest.indexOf('>', openTag) < 0 && !final ? rest.slice(0, openTag) : rest;
       const m = /([.!?…;:])(\s)|\n+/.exec(safe);
@@ -97,53 +126,137 @@ export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
     utter(segment, ids);
   }
 
-  // ---------- reconnaissance ----------
-  function setState(s) { onState?.(s); }
+  /** L'utilisateur prend la parole : l'IA se tait (lecture et réponse en cours). */
+  function yieldFloor() {
+    generation++;
+    ducked = false;
+    clearTimeout(duckTimer);
+    hush();
+    lastSpokeAt = Date.now();
+    pending = 0; streamDone = true; afterSpeech = null; consumed = 0;
+    setState('user');
+    onBargeIn?.();
+  }
 
-  function listen() {
-    if (!active || listening) return;
-    heard = '';
-    onTranscript?.('');
+  // ---------- reconnaissance continue ----------
+  let rec = null;
+  let startIdx = 0;          // résultats déjà traités (écho ignoré ou message envoyé)
+  let heard = '';
+  let silenceTimer = null;
+
+  function startRecognition() {
+    if (!active) return;
     try {
       rec = new support.SR();
       rec.lang = 'fr-FR';
       rec.continuous = true;
       rec.interimResults = true;
-      rec.onresult = e => {
-        let t = '';
-        for (let i = 0; i < e.results.length; i++) t += e.results[i][0].transcript;
-        heard = t;
-        onTranscript?.(t);
-        clearTimeout(silenceTimer);
-        silenceTimer = setTimeout(finishUtterance, SILENCE_MS);
-      };
+      startIdx = 0;
+      rec.onresult = onResult;
       rec.onerror = e => { if (e.error === 'not-allowed' || e.error === 'service-not-allowed') { setState('denied'); stop(); } };
-      rec.onend = () => { listening = false; if (active && !heard.trim() && pending === 0 && streamDone) setTimeout(listen, 200); };
+      rec.onend = () => { rec = null; if (active) setTimeout(startRecognition, 150); }; // Chrome coupe régulièrement
       rec.start();
-      listening = true;
-      setState('listening');
-    } catch { listening = false; }
+    } catch { setTimeout(startRecognition, 500); }
   }
 
-  function stopListening() {
+  function onResult(e) {
+    if (!active) return;
+    let text = '';
+    let lastFinal = false;
+    for (let i = startIdx; i < e.results.length; i++) { text += e.results[i][0].transcript; lastFinal = e.results[i].isFinal !== false; }
+    text = text.trim();
+    if (!text) return;
+
+    const recentlySpoke = Date.now() - lastSpokeAt < ECHO_GRACE_MS;
+    if (phase !== 'user' && !aiTalking() && phase !== 'thinking' && recentlySpoke && isEcho(text, recentSpoken.join(' '))) {
+      if (lastFinal) startIdx = e.results.length; // fin d'écho arrivée après la lecture
+      return;
+    }
+    if (phase !== 'user' && (aiTalking() || phase === 'speaking' || phase === 'ducked')) {
+      if (isEcho(text, recentSpoken.join(' '))) {
+        if (lastFinal) startIdx = e.results.length; // écho confirmé : on l'oublie
+        return;
+      }
+      yieldFloor(); // c'est l'utilisateur : l'IA s'efface
+    } else if (phase === 'thinking') {
+      yieldFloor(); // il reprend la parole avant la réponse : on annule la demande
+    }
+    if (phase !== 'user') setState('user');
+    heard = text;
+    onTranscript?.(text);
     clearTimeout(silenceTimer);
-    listening = false;
-    try { rec?.abort(); } catch { /* déjà arrêté */ }
-    rec = null;
+    silenceTimer = setTimeout(() => finishUtterance(e.results.length), SILENCE_MS);
   }
 
-  function finishUtterance() {
+  function finishUtterance(upTo) {
     const text = heard.trim();
-    stopListening();
-    if (!text) { listen(); return; }
+    heard = '';
+    startIdx = Math.max(startIdx, upTo);
+    if (!text) { setState('listening'); return; }
     setState('thinking');
     onUtterance(text);
   }
 
+  // ---------- détection d'activité vocale : la voix de l'IA se suspend dès qu'on parle ----------
+  let audioCtx = null, stream = null, vadTimer = null, ducked = false, duckTimer = null;
+  let noise = 0.01, echoLevel = 0, loudSince = 0, falseAlarms = 0, vadEnabled = true;
+
+  async function startVad() {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = audioCtx.createMediaStreamSource(stream);
+      const an = audioCtx.createAnalyser();
+      an.fftSize = 1024;
+      src.connect(an);
+      const buf = new Float32Array(an.fftSize);
+      vadTimer = setInterval(() => {
+        an.getFloatTimeDomainData(buf);
+        let sum = 0; for (const v of buf) sum += v * v;
+        const rms = Math.sqrt(sum / buf.length);
+        if (phase !== 'speaking' && phase !== 'ducked') { noise = noise * 0.95 + rms * 0.05; echoLevel = 0; loudSince = 0; return; }
+        // Pendant la lecture : niveau d'écho de référence, puis voix nettement au-dessus.
+        echoLevel = Math.max(echoLevel * 0.98, rms);
+        const threshold = Math.max(noise * 4, 0.03, echoLevel * 0.85 + 0.02);
+        if (rms > threshold && vadEnabled) {
+          loudSince ||= performance.now();
+          if (!ducked && performance.now() - loudSince > DUCK_MS) duck();
+        } else loudSince = 0;
+      }, 40);
+    } catch { /* pas de micro direct : la reconnaissance suffit */ }
+  }
+
+  function duck() {
+    ducked = true;
+    try { speechSynthesis.pause(); } catch { /* non pris en charge */ }
+    setState('ducked');
+    clearTimeout(duckTimer);
+    duckTimer = setTimeout(() => {
+      // La reconnaissance n'a rien confirmé : fausse alerte (bruit, écho), on reprend.
+      if (!ducked) return;
+      ducked = false;
+      falseAlarms++;
+      if (falseAlarms >= 3) vadEnabled = false; // haut-parleurs trop forts : on s'en remet à la reconnaissance
+      try { speechSynthesis.resume(); } catch { /* non pris en charge */ }
+      setState('speaking');
+    }, DUCK_RELEASE_MS);
+  }
+
+  function stopVad() {
+    clearInterval(vadTimer); vadTimer = null;
+    stream?.getTracks().forEach(t => t.stop()); stream = null;
+    audioCtx?.close().catch(() => {}); audioCtx = null;
+  }
+
   function stop() {
     active = false;
-    stopListening();
-    speechSynthesis.cancel();
+    generation++;
+    clearTimeout(silenceTimer); clearTimeout(duckTimer);
+    try { rec?.abort(); } catch { /* déjà arrêté */ }
+    rec = null;
+    hush();
+    stopVad();
     pending = 0; streamDone = true; afterSpeech = null;
     setState('off');
   }
@@ -151,16 +264,21 @@ export function createVoice({ onUtterance, onState, onFocus, onTranscript }) {
   return {
     supported: true,
     get active() { return active; },
-    start() { active = true; speechSynthesis.cancel(); listen(); },
+    start() {
+      active = true; falseAlarms = 0; vadEnabled = true;
+      hush();
+      setState('listening');
+      startRecognition();
+      startVad();
+    },
     stop,
-    /** Coupe la parole de l'IA et rend la main à l'utilisateur. */
-    interrupt() { speechSynthesis.cancel(); pending = 0; streamDone = true; afterSpeech = null; stopListening(); listen(); },
+    /** Interruption manuelle (clic sur l'indicateur). */
+    interrupt() { yieldFloor(); setState('listening'); },
     // flux de la réponse
-    beginResponse() { stopListening(); speechSynthesis.cancel(); pending = 0; consumed = 0; streamDone = false; setState('thinking'); },
+    beginResponse() { generation++; hush(); pending = 0; consumed = 0; streamDone = false; setState('thinking'); },
     pushResponse(full) { consume(full, false); },
     endResponse(full, then) { consume(full, true); streamDone = true; afterSpeech = then || null; maybeIdle(); },
-    /** Lit un texte, puis exécute `then` (ou réécoute). */
-    say(text, { focus, then } = {}) { stopListening(); speechSynthesis.cancel(); pending = 0; streamDone = true; afterSpeech = then || null; utter(text, focus); if (!pending) maybeIdle(); },
-    listen
+    /** Lit un texte, puis exécute `then`. */
+    say(text, { focus, then } = {}) { generation++; hush(); pending = 0; streamDone = true; afterSpeech = then || null; utter(text, focus); if (!pending) maybeIdle(); }
   };
 }

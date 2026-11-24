@@ -333,9 +333,13 @@ textarea.field { resize: vertical; line-height: 1.45; }
 .btn.active { background: var(--acc); border-color: var(--acc); color: #fff; }
 .voice-panel { display: flex; align-items: center; gap: 12px; border: 1px solid var(--line); border-radius: 12px; padding: 10px 12px; background: var(--panel); flex-wrap: wrap; }
 .voice-panel .vp-text { flex: 1 1 160px; display: grid; }
-.orb { width: 34px; height: 34px; border-radius: 50%; background: var(--ink); display: grid; place-items: center; flex: none; }
+.orb { width: 34px; height: 34px; border-radius: 50%; background: var(--ink); display: grid; place-items: center; flex: none; border: 0; padding: 0; cursor: pointer; transition: background .2s; }
 .orb span { width: 12px; height: 12px; border-radius: 50%; background: #fff; }
-.voice-panel[data-state=listening] .orb { background: var(--acc); animation: pulse 1.4s ease-in-out infinite; }
+.voice-panel[data-state=listening] .orb, .voice-panel[data-state=user] .orb { background: var(--acc); animation: pulse 1.4s ease-in-out infinite; }
+.voice-panel[data-state=user] .orb span { transform: scale(1.25); }
+.voice-panel[data-state=ducked] .orb { background: #a78bfa; }
+.voice-panel .vp-tip { font-size: 12px; }
+.voice-panel:not([data-state=listening]) .vp-tip { display: none; }
 .voice-panel[data-state=thinking] .orb span { animation: spin .8s linear infinite; border-radius: 3px; }
 .voice-panel[data-state=speaking] .orb { background: #7c3aed; }
 .voice-panel[data-state=speaking] .orb span { animation: talk .5s ease-in-out infinite alternate; }

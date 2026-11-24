@@ -56,6 +56,7 @@ export function createAssistant(ctx, host) {
   let review = null;
   let autoReview = null;
   let pendingContext = null;   // contexte joint au prochain message (parcours de l'explorateur)
+  let bargedIn = false;        // réponse coupée par l'utilisateur qui reprend la parole
 
   const support = voiceSupport();
   const el = h(`<div class="ai">
@@ -67,9 +68,9 @@ export function createAssistant(ctx, host) {
       </div>
     </div>
     <div class="voice-panel" hidden>
-      <div class="orb" aria-hidden="true"><span></span></div>
-      <div class="vp-text"><b class="vp-state">Je vous écoute…</b><span class="vp-heard muted small"></span></div>
-      <div class="row"><button class="btn small" data-a="interrupt">Couper la parole</button><button class="btn small ghost" data-a="voice-off">Terminer</button></div>
+      <button type="button" class="orb" title="Parlez quand vous voulez : l'assistant se tait dès que vous prenez la parole" aria-label="Indicateur vocal"><span></span></button>
+      <div class="vp-text"><b class="vp-state">Je vous écoute…</b><span class="vp-heard muted small"></span><span class="vp-tip muted small">Parlez quand vous voulez, même pendant que l'assistant parle.</span></div>
+      <button class="btn small ghost" data-a="voice-off">Terminer</button>
     </div>
     <div class="ai-log" aria-live="polite"></div>
     <div class="ai-suggest"></div>
@@ -260,6 +261,14 @@ export function createAssistant(ctx, host) {
       }
     } catch (e) {
       out.remove();
+      if (e.name === 'AbortError' && bargedIn) {
+        // Coupé par l'utilisateur : on garde ce qui a été dit, pour que l'IA sache où elle en était.
+        bargedIn = false;
+        const said = withoutChanges(full).trim();
+        if (said) { history.push({ role: 'assistant', content: `${said} […]` }); persist(); bubble('assistant', `${said} […]`); }
+        else { history.pop(); persist(); }
+        return;
+      }
       history.pop(); persist();
       if (e.name === 'AbortError') bubble('sys', 'Demande interrompue.');
       else { bubble('err', e.message); ta.value = typed; if (speaking) voice.say(`Désolé, une erreur est survenue : ${e.message}`); }
@@ -393,7 +402,7 @@ export function createAssistant(ctx, host) {
   }
 
   // ---------- conversation vocale ----------
-  const STATES = { listening: 'Je vous écoute…', thinking: 'Je réfléchis…', speaking: 'Je parle… (vous pouvez me couper)', denied: 'Micro refusé par le navigateur.', off: '' };
+  const STATES = { listening: 'Je vous écoute…', user: 'Je vous écoute…', thinking: 'Je réfléchis…', speaking: 'Je parle…', ducked: 'Je vous laisse parler…', denied: 'Micro refusé par le navigateur.', off: '' };
   const voice = support.ok ? createVoice({
     onUtterance(text) {
       if (review) return voiceCommand(text);
@@ -401,7 +410,11 @@ export function createAssistant(ctx, host) {
     },
     onState(s) { vp.dataset.state = s; vp.querySelector('.vp-state').textContent = STATES[s] || ''; if (s === 'denied') setVoice(false); },
     onFocus(ids) { focus.show(ids, { highlight: true }); },
-    onTranscript(t) { vp.querySelector('.vp-heard').textContent = t; }
+    onTranscript(t) { vp.querySelector('.vp-heard').textContent = t; },
+    onBargeIn() {
+      // L'utilisateur reprend la parole : on arrête la réponse en cours (comme dans une vraie conversation).
+      if (busy && controller) { bargedIn = true; controller.abort(); }
+    }
   }) : null;
 
   function voiceCommand(text) {
@@ -428,7 +441,7 @@ export function createAssistant(ctx, host) {
   if (!voice) { voiceBtn.disabled = true; voiceBtn.title = support.reason; }
   voiceBtn.addEventListener('click', () => setVoice(!voice?.active));
   vp.querySelector('[data-a=voice-off]').addEventListener('click', () => setVoice(false));
-  vp.querySelector('[data-a=interrupt]').addEventListener('click', () => { voice?.interrupt(); });
+  vp.querySelector('.orb').addEventListener('click', () => { voice?.interrupt(); });
 
   // ---------- saisie ----------
   form.addEventListener('submit', e => {
