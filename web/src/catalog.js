@@ -209,3 +209,25 @@ export const CATALOG = [
     spec: { nodes: [{ id: 'S', t: 'sub', triggered: true, x: 10, y: 10, w: 300, h: 110, name: 'Échéance' }, { id: 's1', t: 'start', ev: 'timer', timer: ['timeDate', '${dueDate}'], parent: 'S', x: 40, y: 47 }, { id: 'a', t: 'throw', ev: 'compensate', parent: 'S', x: 130, y: 47, name: 'Compenser' }, { id: 'e', t: 'end', ev: 'error', parent: 'S', x: 230, y: 47, name: 'Expiré' }], flows: [['s1', 'a'], ['a', 'e']] },
     ask: 'Dans le sous-processus sélectionné, ajoute un sous-processus événementiel interrompant déclenché à l\'échéance ${dueDate}, qui compense les étapes terminées puis lève l\'erreur « Dossier expiré » ; capture cette erreur sur le bord du sous-processus et notifie le client.' }
 ];
+
+/** Entrée du catalogue qui décrit un élément du diagramme (pour l'aide contextuelle). */
+export function entryFor(element) {
+  const bo = element.businessObject;
+  const def = (bo.eventDefinitions || [])[0]?.$type?.replace('bpmn:', '').replace('EventDefinition', '').toLowerCase() || 'none';
+  const byType = {
+    'bpmn:Task': 'task', 'bpmn:UserTask': 'user', 'bpmn:ServiceTask': 'service', 'bpmn:SendTask': 'send', 'bpmn:ReceiveTask': 'receive',
+    'bpmn:ScriptTask': 'script', 'bpmn:BusinessRuleTask': 'rule', 'bpmn:ManualTask': 'manual', 'bpmn:CallActivity': 'call',
+    'bpmn:ExclusiveGateway': 'xor', 'bpmn:ParallelGateway': 'and', 'bpmn:InclusiveGateway': 'or', 'bpmn:EventBasedGateway': 'evgw',
+    'bpmn:TextAnnotation': 'note', 'bpmn:DataObjectReference': 'data', 'bpmn:DataStoreReference': 'store', 'bpmn:Participant': 'pool'
+  };
+  const events = {
+    'bpmn:StartEvent': { none: 'start', message: 'start-message', timer: 'start-timer', signal: 'start-signal' },
+    'bpmn:IntermediateCatchEvent': { timer: 'catch-timer', message: 'catch-message', conditional: 'catch-conditional' },
+    'bpmn:IntermediateThrowEvent': { message: 'throw-message', escalation: 'throw-escalation', compensate: 'throw-compensate' },
+    'bpmn:EndEvent': { none: 'end', error: 'end-error', terminate: 'end-terminate', message: 'end-message' },
+    'bpmn:BoundaryEvent': { timer: bo.cancelActivity === false ? 'b-timer-nonint' : 'b-timer-int', error: 'b-error', message: 'b-message', compensate: 'b-compensate' }
+  };
+  let id = byType[element.type] || events[element.type]?.[def];
+  if (element.type === 'bpmn:SubProcess') id = bo.triggeredByEvent ? 'evsub' : 'sub';
+  return CATALOG.find(e => e.id === id) || null;
+}

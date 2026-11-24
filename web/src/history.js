@@ -1,14 +1,14 @@
-// Historique des versions : consultation sur le canevas, restauration.
+// Historique Git du diagramme : consultation d'une version sur le canevas, restauration.
 import { api } from './api.js';
 import { h, esc, fmtDate, toast } from './dom.js';
 
 export function createHistory(ctx, host) {
-  let viewing = null;   // numéro de version affichée
+  let viewing = null;   // sha affiché
   let savedXml = null;  // état du canevas avant consultation
+  let items = [];
 
   const el = h(`<div class="props">
-    <h3 class="props-title">Historique</h3>
-    <p class="muted small">Chaque enregistrement crée une version. Cliquez sur une version pour l'afficher sur le diagramme.</p>
+    <p class="muted small">Chaque enregistrement est un commit Git signé par son auteur. Cliquez sur une version pour l'afficher sur le diagramme, puis restaurez-la si besoin.</p>
     <ol class="versions"><li class="muted">Chargement…</li></ol>
   </div>`);
   host.append(el);
@@ -16,46 +16,48 @@ export function createHistory(ctx, host) {
 
   async function load() {
     try {
-      const items = await api.versions(ctx.id);
-      list.innerHTML = items.map(v => `<li><button class="ver ${v.version === ctx.version ? 'cur' : ''} ${v.version === viewing ? 'on' : ''}" data-v="${v.version}">
-        <b>v${v.version}</b>${v.version === ctx.version ? ' <span class="tag soft">actuelle</span>' : ''}
-        <span class="muted small">${esc(fmtDate(v.createdAt))}${v.author ? ' · ' + esc(v.author) : ''}</span>
+      items = await api.versions(ctx.id);
+      list.innerHTML = items.map(v => `<li><button class="ver ${v.sha === ctx.rev ? 'cur' : ''} ${v.sha === viewing ? 'on' : ''}" data-sha="${esc(v.sha)}">
+        <span class="ver-head"><b>v${v.version}</b>${v.sha === ctx.rev ? '<span class="tag soft">actuelle</span>' : ''}<span class="mono muted small">${esc(v.sha.slice(0, 7))}</span></span>
+        <span class="muted small">${esc(fmtDate(v.createdAt))} · ${esc(v.author)}</span>
         ${v.message ? `<span class="small">${esc(v.message)}</span>` : ''}
-      </button></li>`).join('');
+      </button></li>`).join('') || '<li class="muted">Aucune version.</li>';
     } catch (e) { list.innerHTML = `<li class="error">${esc(e.message)}</li>`; }
   }
 
   list.addEventListener('click', async e => {
-    const b = e.target.closest('[data-v]');
+    const b = e.target.closest('[data-sha]');
     if (!b) return;
-    const v = Number(b.dataset.v);
-    if (ctx.previewing && viewing === null) { toast('Terminez d\'abord la proposition de l\'IA en cours.', 'error'); return; }
-    if (v === ctx.version && viewing === null) return;
-    await show(v);
+    const sha = b.dataset.sha;
+    if (ctx.previewing && viewing === null) { toast('Terminez d\'abord la revue de l\'assistant en cours.', 'error'); return; }
+    if (sha === ctx.rev && viewing === null) return;
+    if (sha === ctx.rev) return close();
+    await show(sha);
   });
 
-  async function show(v) {
-    const ver = await api.version(ctx.id, v);
+  async function show(sha) {
+    const v = items.find(x => x.sha === sha);
+    const { xml } = await api.version(ctx.id, sha);
     if (viewing === null) savedXml = await ctx.getXml();
-    viewing = v;
+    viewing = sha;
     ctx.previewing = true;
-    await ctx.importXml(ver.xml, { fit: false });
+    await ctx.importXml(xml, { fit: false });
     ctx.emit('mode', 'history');
     const banner = h(`<div class="banner-in">
-      <div><b>Version ${v}</b> <span class="muted small">${esc(fmtDate(ver.createdAt))}${ver.author ? ' · ' + esc(ver.author) : ''}</span></div>
+      <div><b>Version ${v.version}</b> <span class="muted small">${esc(fmtDate(v.createdAt))} · ${esc(v.author)}${v.message ? ' · ' + esc(v.message) : ''}</span></div>
       <div class="row">
         <button class="btn" data-a="close">Revenir à la version de travail</button>
-        ${ctx.canEdit ? `<button class="btn primary" data-a="restore" ${ctx.editing ? '' : 'disabled title="Passez en mode édition pour restaurer"'}>Restaurer cette version</button>` : ''}
+        <button class="btn primary" data-a="restore" ${ctx.editing ? '' : 'disabled title="Passez en mode édition pour restaurer"'}>Restaurer cette version</button>
       </div></div>`);
     banner.querySelector('[data-a=close]').addEventListener('click', close);
-    banner.querySelector('[data-a=restore]')?.addEventListener('click', async () => {
+    banner.querySelector('[data-a=restore]').addEventListener('click', () => {
       ctx.hideBanner();
       ctx.previewing = false;
       viewing = null; savedXml = null;
       ctx.applyLock();
-      ctx.markDirty(`Restauration de la version ${v}`);
+      ctx.markDirty(`Restauration de la version ${v.version} (${sha.slice(0, 7)})`);
       ctx.emit('mode', 'edit');
-      toast(`Version ${v} restaurée : enregistrez pour la publier.`);
+      toast(`Version ${v.version} restaurée : enregistrez pour la publier.`);
       load();
     });
     ctx.showBanner(banner);
@@ -73,7 +75,7 @@ export function createHistory(ctx, host) {
 
   ctx.on('tab', t => { if (t === 'history') load(); });
   ctx.on('saved', load);
-  ctx.on('editing', async on => { if (!on && viewing !== null) await close(); });
+  ctx.on('editing', async on => { if (!on && viewing !== null) await close(); else load(); });
   load();
   return { destroy() {} };
 }

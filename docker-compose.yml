@@ -8,13 +8,16 @@ services:
     expose:
       - "3000"
     environment:
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?ADMIN_PASSWORD requis}
+      GIT_REMOTE_URL: ${GIT_REMOTE_URL:-}
+      GIT_BRANCH: ${GIT_BRANCH:-main}
       SESSION_SECRET: ${SESSION_SECRET:-}
       LLM_PROVIDER: ${LLM_PROVIDER:-anthropic}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
-      AI_RATE_LIMIT_PER_HOUR: ${AI_RATE_LIMIT_PER_HOUR:-40}
+      AI_RATE_LIMIT_PER_HOUR: ${AI_RATE_LIMIT_PER_HOUR:-60}
     volumes:
       - bpmn-data:/data
 

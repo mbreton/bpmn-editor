@@ -1,78 +1,71 @@
 # Éditeur BPMN
 
-Éditeur BPMN 2.0 collaboratif et auto-hébergé, en français. Il est construit sur [bpmn-js](https://bpmn.io), une bibliothèque open source sous licence MIT.
+Éditeur BPMN 2.0 collaboratif et auto-hébergé, en français. Il est construit sur [bpmn-js](https://bpmn.io), une bibliothèque open source sous licence MIT. Les diagrammes sont versionnés dans un dépôt **Git**.
 
-- **Édition** du diagramme : palette, barre d'outils contextuelle, annuler et rétablir.
-- **Panneau de propriétés** : noms, délais (durée, date, cycle ISO 8601, avec leur traduction en clair), événements interrompants ou non, erreurs, messages, signaux et escalades, conditions et flux par défaut, scripts, documentation.
-- **Contrôle de cohérence** : éléments jamais atteints, chemins sans fin, passerelles sans condition, timers vides, etc.
-- **Assistant IA** : on écrit ou on dicte une demande. La proposition s'affiche sur le diagramme, avec les ajouts en vert, les modifications en orange et la liste des suppressions. On l'accepte, on la précise ou on l'annule.
-- **Centre d'aide** : recherche par intention (« relancer », « si / sinon », « en parallèle »…). Chaque composant a une vignette, une explication, et un bouton pour l'ajouter au diagramme ou le demander à l'assistant.
-- **Simulation pas à pas** (bpmn-js-token-simulation) : les jetons avancent élément par élément avec le bouton « Étape suivante ». On choisit la branche aux passerelles et on déclenche les timers et messages à la main.
-- **Collaboration** : verrou d'édition (une seule personne modifie à la fois, les autres voient qui), historique des versions avec restauration, détection des conflits.
-- **Partage** : liens par diagramme, en lecture et simulation ou en modification, sans compte et révocables.
-- **Export** : `.bpmn`, SVG, PNG.
+- **Comptes** : n'importe qui peut créer un compte, mais il faut qu'un administrateur le valide. Un compte validé accède à tous les diagrammes. Pour partager un diagramme, il suffit d'envoyer l'adresse de sa page.
+- **Git** : un fichier `.bpmn` par diagramme et un commit par enregistrement, avec la personne connectée comme auteur. L'historique permet de consulter et de restaurer chaque version. On peut ajouter un dépôt distant (GitHub, GitLab…) : il est cloné au démarrage, récupéré régulièrement, et chaque enregistrement y est poussé.
+- **Édition** : une seule personne modifie un diagramme à la fois, grâce à un verrou. Les autres voient qui modifie, et récupèrent la nouvelle version une fois qu'elle est enregistrée.
+- **Propriétés** en français : délais (ISO 8601 traduit en clair), événements interrompants ou non, erreurs, messages, conditions sur les flux sortants des passerelles, documentation. Chaque élément affiche une aide contextuelle, et un contrôle de cohérence passe sur tout le diagramme.
+- **Assistant IA conversationnel** : on discute du diagramme par écrit ou à la voix, la réponse s'affiche au fil de l'eau. Ensuite, l'IA propose des **modifications une par une**. Pour chacune, l'éditeur zoome sur la zone concernée, explique pourquoi et ce que ça apporte, et on accepte ou on refuse.
+- **Centre d'aide** : recherche par intention (« relancer », « si / sinon »…), avec une vignette, une explication et l'insertion directe dans le diagramme.
+- **Simulation pas à pas** : « Étape suivante » démarre le jeton, puis le fait avancer élément par élément. Quand plusieurs événements sont possibles (réponse reçue ou délai écoulé), elle demande lequel se produit.
+- Le **panneau latéral** est redimensionnable. **Export** en `.bpmn`, SVG et PNG.
+
+## Déploiement sur Coolify
+
+1. **New resource → Public/Private repository** : choisissez ce dépôt, branche `main`, build pack **Dockerfile**.
+2. **Ports Exposes : `3000`**, puis associez un domaine. **Passez en HTTPS dès que possible** : en HTTP, les mots de passe circulent en clair et la dictée vocale est désactivée par le navigateur.
+3. **Stockage persistant** : montez un volume sur `/data`. Il contient la base SQLite (comptes, index, verrous) et le dépôt Git local (`/data/repo`).
+4. Variables d'environnement (voir `.env.example`) :
+
+| Variable | Rôle |
+|---|---|
+| `ADMIN_EMAIL`, `ADMIN_PASSWORD` | Compte administrateur, créé ou mis à jour à chaque démarrage. L'identifiant vaut `admin` par défaut. |
+| `GIT_REMOTE_URL` | Facultatif. Dépôt distant, par exemple `https://x-access-token:<jeton>@github.com/org/diagrammes.git` avec un jeton fine-grained qui a le droit *Contents: read & write*. Pour SSH, montez une clé et utilisez `git@…`. |
+| `GIT_BRANCH`, `GIT_SUBDIR`, `GIT_SYNC_INTERVAL` | Branche (`main`), dossier des diagrammes dans le dépôt (`diagrams`), intervalle de récupération en secondes (300). |
+| `LLM_API_KEY` | Clé du fournisseur IA. Sans clé, l'assistant est désactivé. |
+| `LLM_PROVIDER`, `LLM_MODEL`, `LLM_BASE_URL` | `anthropic` (par défaut, modèle `claude-sonnet-5-5`) ou `openai` pour toute API compatible `/chat/completions` en streaming : LiteLLM, Scaleway, Mistral, vLLM… |
+| `COOKIE_SECURE` | `auto` par défaut : le cookie de session est marqué `Secure` seulement en HTTPS. |
+
+Le healthcheck répond sur `GET /healthz`.
+
+**Mise à jour depuis la version précédente** : au premier démarrage, les diagrammes et les versions stockés dans l'ancienne base SQLite sont repris dans Git, avec leurs auteurs et leurs dates d'origine. Les liens de partage disparaissent : chaque personne crée maintenant son compte. Sans `ADMIN_EMAIL`, l'administrateur se connecte avec l'identifiant `admin` et le même `ADMIN_PASSWORD`.
 
 ## Démarrage en local
 
 ```bash
 npm install
-cp .env.example .env        # puis renseigner ADMIN_PASSWORD (et LLM_API_KEY pour l'assistant)
+cp .env.example .env       # renseigner ADMIN_PASSWORD (et LLM_API_KEY pour l'assistant)
 npm run build
-node --env-file=.env server/index.js
-# → http://localhost:3000
+node --env-file=.env server/index.js     # → http://localhost:3000 (git doit être installé)
 ```
 
-En développement, avec rechargement à chaud : `node --env-file=.env --watch server/index.js` dans un terminal et `npx vite` dans un autre, puis ouvrir http://localhost:5173.
+En développement : `node --env-file=.env --watch server/index.js` et `npx vite` (http://localhost:5173). Pour lancer les tests de l'API (comptes, Git local et distant, migration, assistant) : `npm test`.
 
-Tests de l'API : `npm test`.
+## Comment fonctionne l'assistant
 
-## Déploiement sur Coolify
-
-1. **New resource → Public/Private repository** : pointer sur ce dépôt, branche `main`.
-2. Build pack : **Dockerfile** (ou **Docker Compose** avec le `docker-compose.yml` fourni).
-3. **Ports Exposes : `3000`**. C'est le port interne vers lequel le proxy de Coolify envoie le trafic, inutile de publier un port sur l'hôte. Associez un domaine (en Docker Compose : `https://votre-domaine:3000` dans le champ Domains du service, le `:3000` désignant le port interne). Coolify fournit le HTTPS.
-4. **Stockage persistant** : monter un volume sur `/data`. La base SQLite s'y trouve, avec les diagrammes, les versions et les liens. C'est le seul élément à sauvegarder.
-5. Variables d'environnement (voir `.env.example`) :
-
-| Variable | Obligatoire | Rôle |
-|---|---|---|
-| `ADMIN_PASSWORD` | oui | Mot de passe de l'administrateur (création, suppression, liens de partage). |
-| `SESSION_SECRET` | non | Secret de signature des sessions. Sans lui, un secret est généré et stocké en base. |
-| `LLM_API_KEY` | pour l'IA | Clé du fournisseur. Sans clé, l'assistant est désactivé et le reste fonctionne. |
-| `LLM_PROVIDER` | non | `anthropic` (par défaut) ou `openai` pour toute API compatible `/chat/completions` (OpenAI, LiteLLM, Scaleway, Mistral, vLLM…). |
-| `LLM_MODEL` | non | Par défaut `claude-sonnet-5-5` avec Anthropic. |
-| `LLM_BASE_URL` | non | URL de l'API, par ex. `https://api.scaleway.ai/v1` ou l'URL d'un proxy LiteLLM. |
-| `AI_RATE_LIMIT_PER_HOUR` | non | Nombre d'appels IA par heure et par adresse IP (40 par défaut). |
-| `COOKIE_SECURE` | non | `auto` par défaut : cookie `Secure` seulement si la requête arrive en HTTPS (`X-Forwarded-Proto` compris). `true` ou `false` pour forcer. |
-| `LISTEN_HOST` | non | Interface d'écoute, `0.0.0.0` par défaut. |
-| `TRUST_PROXY` | non | `true` par défaut, adapté derrière le proxy de Coolify. Mettre `false` si le conteneur est exposé directement. |
-
-Le healthcheck répond sur `GET /healthz`.
-
-## Utilisation
-
-- **Administrateur** : se connecter avec `ADMIN_PASSWORD`, créer ou importer des diagrammes, puis créer des liens de partage depuis l'onglet **Partage** de chaque diagramme.
-- **Personnes invitées** : elles ouvrent le lien `https://votre-domaine/s/<jeton>`. Avec un lien « Modification », le bouton **Modifier** prend le verrou. Il est renouvelé automatiquement et libéré avec « Terminer » ou à la fermeture de l'onglet (au plus tard 90 s après). Le nom saisi au premier passage s'affiche aux autres personnes et dans l'historique.
-- **Assistant** : il faut être en mode édition. Les éléments sélectionnés sont transmis à l'IA comme contexte. **Préciser** renvoie la proposition en cours avec votre correction. **Annuler** rétablit exactement le diagramme d'avant. Après **Accepter**, il faut enregistrer, et un lien « Revenir à l'état d'avant » reste disponible.
-- **Simulation** : bouton **Simuler**, puis ▶ à côté d'un événement de début.
+L'IA reçoit le diagramme à jour à chaque message, sans les coordonnées, ce qui le rend plus léger et plus rapide. Elle ne renvoie jamais de XML. Elle renvoie une liste de modifications, et chacune est une suite d'**opérations** (`append`, `insert`, `attach`, `connect`, `update`, `set_timer`, `set_condition`…). L'éditeur les applique avec les commandes de bpmn-js : la mise en page des nouveaux éléments est calculée par l'éditeur, chaque modification refusée est annulée, et un Ctrl+Z reste possible après la revue. Une modification qui référence un élément introuvable est signalée « non applicable », puis la revue passe à la suivante. Le résultat de la revue (modifications acceptées et refusées) est transmis à l'IA avec le message suivant.
 
 ## Architecture
 
 ```
-server/        API Fastify + SQLite (module natif node:sqlite, aucune dépendance compilée)
-  app.js       routes : diagrammes, versions, verrou, liens de partage, assistant IA
-  db.js        schéma et requêtes (concurrence optimiste + bail de verrou de 90 s)
-  ai.js        relais LLM, validation du BPMN renvoyé (bpmn-moddle + présence de la DI), une passe de correction automatique
-web/src/       application Vite sans framework
-  editor.js    modeler bpmn-js, verrou, enregistrement, export
-  properties.js, assistant.js, help.js (+ catalog.js, snippet.js), simulation.js, history.js, sharing.js
+server/
+  app.js        routes : comptes, diagrammes, verrou, historique, assistant (flux SSE)
+  auth.js       comptes (scrypt), sessions signées, administrateur défini par l'environnement
+  git.js        dépôt Git : écriture + commit par auteur, mv/rm, log --follow, clone/pull --rebase/push
+  diagrams.js   index SQLite ↔ fichiers du dépôt, réindexation, migration de l'ancien stockage
+  ai.js         relais LLM en streaming (Anthropic / compatible OpenAI), prompt et format des opérations
+web/src/
+  editor.js     modeler bpmn-js, verrou, enregistrement, panneau redimensionnable
+  assistant.js  conversation + revue une par une ; aiops.js applique les opérations
+  properties.js, help.js (+ catalog.js), simulation.js, history.js
 ```
 
 ## Limites connues
 
-- La **dictée** utilise la reconnaissance vocale du navigateur (Chrome, Edge, Safari). Le bouton micro est masqué ailleurs, notamment sous Firefox. Sous Chrome, l'audio est transcrit par le service de reconnaissance de Google.
-- Afficher une proposition de l'IA ou une ancienne version recharge le diagramme : la pile annuler/rétablir repart de zéro. L'historique des versions et le lien « Revenir à l'état d'avant » prennent le relais.
-- Pas de coédition en temps réel : une seule personne modifie à la fois, c'est le rôle du verrou.
-- Un seul compte administrateur. Les autres accès passent par les liens de partage.
+- **Pas de branches dans l'interface.** Tout est commité sur une seule branche, mais le dépôt reste un dépôt Git standard : vous pouvez y travailler en branches à côté et fusionner sur la branche configurée. La synchronisation récupère alors les fichiers.
+- **Conflits avec des commits extérieurs** : si une modification faite directement dans le dépôt touche le même fichier qu'un enregistrement local pas encore poussé, la synchronisation s'arrête sans rien écraser et l'erreur s'affiche dans **Administration → Dépôt Git**.
+- **La dictée** dépend du navigateur (Chrome, Edge, Safari, en HTTPS uniquement). Sous Chrome, l'audio est transcrit par un service de Google.
+- **Une seule personne modifie un diagramme à la fois** : il n'y a pas de coédition en temps réel.
 
 Le logo bpmn.io affiché dans le canevas est exigé par la licence de bpmn-js et doit rester visible.

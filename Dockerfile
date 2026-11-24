@@ -9,9 +9,10 @@ RUN npm run build && npm prune --omit=dev
 
 # ---- exécution ----
 FROM node:22-alpine
+RUN apk add --no-cache git openssh-client
 ENV NODE_ENV=production \
     PORT=3000 \
-    DATABASE_FILE=/data/bpmn.sqlite \
+    DATA_DIR=/data \
     NODE_OPTIONS=--disable-warning=ExperimentalWarning
 WORKDIR /app
 COPY --from=build /app/node_modules ./node_modules

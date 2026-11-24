@@ -16,7 +16,6 @@ export function createHelp(ctx, host) {
   const modeling = modeler.get('modeling');
 
   const el = h(`<div class="help">
-    <h3 class="props-title">Centre d'aide BPMN</h3>
     <input class="field" type="search" placeholder="Que voulez-vous faire ? ex. relancer, délai, si/sinon, en parallèle…" aria-label="Rechercher un composant">
     <div class="help-list"></div>
   </div>`);
@@ -123,6 +122,15 @@ export function createHelp(ctx, host) {
   }
 
   search.addEventListener('input', render);
+  ctx.showHelp = entryId => {
+    const entry = CATALOG.find(e => e.id === entryId);
+    if (!entry) return;
+    ctx.selectTab('help');
+    search.value = entry.title;
+    render();
+    const card = [...list.querySelectorAll('.hcard')].find(d => d.querySelector('.ht').textContent === entry.title);
+    if (card) { card.open = true; card.scrollIntoView({ block: 'nearest' }); }
+  };
   ctx.on('editing', () => refreshButtons());
   ctx.on('mode', () => refreshButtons());
   render();

@@ -4,6 +4,7 @@
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { h, esc, dialog } from './dom.js';
 import { TYPE_LABELS, DEF_LABELS, explainIso } from './i18n.js';
+import { entryFor } from './catalog.js';
 
 const TIMER_KINDS = [
   ['timeDuration', 'Durée', 'Délai relatif à l\'arrivée du jeton', ['PT1H', 'PT48H', 'P1D', 'P3D', 'P15D', 'P30D']],
@@ -129,13 +130,25 @@ export function createProperties(ctx, host) {
     const bo = element.businessObject;
     const ro = !editable();
     const el = h(`<div class="props">
+      <button class="linklike back" type="button">← Vue d'ensemble du diagramme</button>
       <h3 class="props-title"></h3>
-      <p class="muted small"></p>
+      <p class="muted small type-line"></p>
       <div class="tags"></div>
+      <div class="explain"></div>
       <div class="sections"></div>
     </div>`);
+    el.querySelector('.back').addEventListener('click', () => selection.select(null));
     el.querySelector('.props-title').textContent = nameOf(bo) || typeLabel(element);
-    el.querySelector('.muted').textContent = `${typeLabel(element)} · ${bo.id}`;
+    el.querySelector('.type-line').textContent = `${typeLabel(element)} · ${bo.id}`;
+    const entry = entryFor(element);
+    if (entry) {
+      const ex = el.querySelector('.explain');
+      ex.append(h('<p class="small"></p>'));
+      ex.firstChild.textContent = `${entry.what} ${entry.when ? 'Quand l\'utiliser : ' + entry.when.charAt(0).toLowerCase() + entry.when.slice(1) : ''}`;
+      const more = h('<button class="linklike small" type="button">En savoir plus dans l\'aide</button>');
+      more.addEventListener('click', () => ctx.showHelp?.(entry.id));
+      ex.append(more);
+    }
     const tags = el.querySelector('.tags');
     const tag = (text, kind = '') => tags.append(Object.assign(h(`<span class="tag ${kind}"></span>`), { textContent: text }));
     const sec = el.querySelector('.sections');
@@ -179,6 +192,9 @@ export function createProperties(ctx, host) {
       }
     }
 
+    // Passerelles : ce qui se règle vraiment se trouve sur les flux sortants
+    if (is(element, 'bpmn:Gateway')) sec.append(gatewaySection(element, ro));
+
     // Flux de séquence : condition et flux par défaut
     if (is(element, 'bpmn:SequenceFlow')) {
       const src = bo.sourceRef;
@@ -209,6 +225,61 @@ export function createProperties(ctx, host) {
       }, ro));
     }
     return el;
+  }
+
+  // ---------- passerelles ----------
+  function gatewaySection(element, ro) {
+    const bo = element.businessObject;
+    const outs = (bo.outgoing || []);
+    const box = h('<div class="fld gw"><span class="lbl">Flux sortants</span><div class="gw-flows"></div><p class="hint"></p></div>');
+    const list = box.querySelector('.gw-flows');
+    const hint = box.querySelector('.hint');
+    const targetName = f => f.targetRef?.name || TYPE_LABELS[f.targetRef?.$type] || f.targetRef?.id || '?';
+    const isChoice = is(element, 'bpmn:ExclusiveGateway') || is(element, 'bpmn:InclusiveGateway');
+    if (!outs.length) {
+      hint.textContent = 'Aucun flux sortant : reliez la passerelle aux étapes suivantes (outil flèche de sa barre d\'outils).';
+      return box;
+    }
+    if (is(element, 'bpmn:ParallelGateway')) hint.textContent = 'Toutes les branches démarrent en même temps. Pour les attendre toutes, réunissez-les sur une seconde passerelle parallèle.';
+    else if (is(element, 'bpmn:EventBasedGateway')) hint.textContent = 'Le premier événement qui survient décide du chemin ; les autres attentes sont abandonnées. Chaque sortie doit mener à une attente (timer, message…) ou une tâche de réception.';
+    else if (outs.length > 1 && isChoice) hint.textContent = is(element, 'bpmn:ExclusiveGateway')
+      ? 'Un seul chemin est suivi : le premier flux dont la condition est vraie, sinon le flux par défaut. Le nom du flux (ex. « oui », « non ») s\'affiche sur le diagramme.'
+      : 'Tous les flux dont la condition est vraie sont suivis ; le flux par défaut sert si aucune ne l\'est.';
+    else if (isChoice) hint.textContent = 'Un seul flux sortant : la passerelle ne décide de rien ici. Elle sert à réunir des chemins ou vous pouvez ajouter d\'autres sorties.';
+
+    for (const f of outs) {
+      const flowEl = registry.get(f.id);
+      const row = h(`<div class="gw-flow"><div class="gw-to"><span class="muted small">vers</span> <b></b></div></div>`);
+      row.querySelector('b').textContent = targetName(f);
+      if (flowEl) {
+        const go = h('<button class="linklike small" type="button">sélectionner</button>');
+        go.addEventListener('click', () => { selection.select(flowEl); });
+        row.querySelector('.gw-to').append(' ', go);
+      }
+      if (isChoice && flowEl) {
+        const isDefault = bo.default === f;
+        const grid = h(`<div class="gw-grid">
+          <input class="field small-field" placeholder="Nom (ex. oui)" aria-label="Nom du flux">
+          <input class="field small-field mono" placeholder="\${condition}" aria-label="Condition">
+          <label class="sw-lbl small"><input type="radio" name="def-${bo.id}"> par défaut</label></div>`);
+        const [nameIn, condIn] = grid.querySelectorAll('input.field');
+        const def = grid.querySelector('input[type=radio]');
+        nameIn.value = f.name || ''; condIn.value = f.conditionExpression?.body || ''; def.checked = isDefault;
+        nameIn.disabled = condIn.disabled = def.disabled = ro;
+        condIn.disabled = ro || isDefault;
+        nameIn.addEventListener('change', () => modeling.updateLabel(flowEl, nameIn.value.trim() || null));
+        condIn.addEventListener('change', () => modeling.updateProperties(flowEl, { conditionExpression: condIn.value.trim() ? bpmnFactory.create('bpmn:FormalExpression', { body: condIn.value.trim() }) : undefined }));
+        def.addEventListener('change', () => { if (def.checked) modeling.updateProperties(element, { default: f }); });
+        row.append(grid);
+      }
+      list.append(row);
+    }
+    if (isChoice && bo.default && !ro) {
+      const clear = h('<button class="linklike small" type="button">Retirer le flux par défaut</button>');
+      clear.addEventListener('click', () => modeling.updateProperties(element, { default: undefined }));
+      box.append(clear);
+    }
+    return box;
   }
 
   // ---------- timer ----------

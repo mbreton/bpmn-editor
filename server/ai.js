@@ -1,133 +1,148 @@
-// Assistant IA : relais vers un LLM (Anthropic ou API compatible OpenAI), avec validation du BPMN produit.
-import { BpmnModdle } from 'bpmn-moddle';
+// Assistant IA conversationnel : relais en streaming vers un LLM (Anthropic ou API compatible OpenAI).
+// L'IA discute du diagramme, puis propose des modifications sous forme d'opérations JSON que
+// l'éditeur applique une par une (l'utilisateur accepte ou refuse chacune).
 
-export const SYSTEM_PROMPT = `You are a senior BPMN 2.0 modeler embedded in a diagram editor used by French-speaking business and tech teams.
+export const OPS_SPEC = `Each change is an object:
+{ "title": "short title in French",
+  "why": "why this change, in French (1-2 sentences)",
+  "benefit": "what it brings, in French (1 sentence)",
+  "focus": ["ids of the existing or new elements to zoom on"],
+  "ops": [ ...operations, applied in order... ] }
 
-You receive the CURRENT diagram as BPMN 2.0 XML (with BPMN DI) and a change request in French. You return the COMPLETE updated diagram.
+Operations (use existing ids from the diagram; give new elements a readable unique "ref" such as "Timer_RelanceKyc", reusable by later operations of the same or later changes):
+- {"op":"update","id":"<id>","name":"…","documentation":"…"}                       (only the fields to change)
+- {"op":"append","ref":"<newId>","after":"<id>","type":"bpmn:UserTask","name":"…"}  (creates the element after <id>, linked by a sequence flow; optional "flowName", "condition")
+- {"op":"insert","ref":"<newId>","flow":"<sequenceFlowId>","type":"…","name":"…"}   (splits an existing sequence flow and puts the element in the middle)
+- {"op":"attach","ref":"<newId>","to":"<activityId>","event":"timer","interrupting":false,"name":"…"}  (boundary event on an activity or sub-process)
+- {"op":"connect","ref":"<newFlowId>","from":"<id>","to":"<id>","name":"…","condition":"\${…}"}
+- {"op":"replace","id":"<id>","type":"bpmn:ServiceTask"}                             (change element type, keeps connections; for events also "event")
+- {"op":"delete","id":"<id>"}
+- {"op":"set_timer","id":"<eventId>","kind":"timeDuration|timeDate|timeCycle","value":"P3D"}
+- {"op":"set_interrupting","id":"<boundaryOrEventSubprocessStartId>","value":false}
+- {"op":"set_condition","id":"<sequenceFlowId>","expression":"\${montant > 1000}"}
+- {"op":"set_default","gateway":"<gatewayId>","flow":"<sequenceFlowId>"}
+- {"op":"set_error","id":"<eventId>","name":"Dossier expiré","code":"DOSSIER_EXPIRE"}   (also set_message / set_signal / set_escalation with "name")
 
-Hard rules:
-1. Output exactly two blocks and nothing else, no markdown fences:
-   <explanation>Short list of what you changed, in French, one change per line starting with "- ". Mention any assumption you made.</explanation>
-   <bpmn>THE FULL UPDATED BPMN 2.0 XML DOCUMENT</bpmn>
-2. Keep every element, id, attribute, extension element and namespace that the request does not ask you to change. Never rename existing ids.
-3. Keep existing DI (BPMNShape bounds, BPMNEdge waypoints) unchanged, except to shift elements so new ones fit without overlapping. Every new flow node, data object, annotation, participant and lane MUST get a BPMNShape; every new sequence flow, message flow and association MUST get a BPMNEdge with orthogonal waypoints that touch the shapes' borders. Tasks are 100x80, events 36x36, gateways 50x50. Place new elements left-to-right following the flow, about 50-80px apart.
-4. Keep the model consistent: incoming/outgoing references match the sequence flows; boundary events use attachedToRef and are placed on the border of their host shape; non-interrupting boundary events use cancelActivity="false"; event sub-processes use triggeredByEvent="true" and their start event's isInterrupting; errors, messages, signals and escalations referenced by event definitions are declared as root elements of definitions.
-5. Timers use ISO 8601 inside a formal expression, e.g. <bpmn:timeDuration xsi:type="bpmn:tFormalExpression">P3D</bpmn:timeDuration>, timeCycle "R3/P1D", or timeDate. Declare xmlns:xsi if you use xsi:type.
-6. Labels (name attributes) are in French, short, verb + object for tasks, past participle or state for events.
-7. If the request is ambiguous, choose the most standard BPMN interpretation and say so in the explanation. If it cannot be done, return the diagram unchanged and explain why.`;
+Element types: bpmn:Task, bpmn:UserTask, bpmn:ServiceTask, bpmn:ScriptTask, bpmn:SendTask, bpmn:ReceiveTask, bpmn:ManualTask, bpmn:BusinessRuleTask, bpmn:CallActivity, bpmn:SubProcess, bpmn:StartEvent, bpmn:EndEvent, bpmn:IntermediateCatchEvent, bpmn:IntermediateThrowEvent, bpmn:ExclusiveGateway, bpmn:ParallelGateway, bpmn:InclusiveGateway, bpmn:EventBasedGateway, bpmn:TextAnnotation.
+"event" (for events, attach and replace): none | timer | message | error | signal | escalation | compensate | conditional | terminate. With "event":"timer" you may add "timer":{"kind":"timeDuration","value":"P3D"}.
+Timers use ISO 8601: P3D, PT48H, R3/P1D (3 times, every day), or an expression like \${dueDate} with kind timeDate.`;
 
-const MAX_TOKENS = 32000;
+export const SYSTEM_PROMPT = `You are a senior BPMN 2.0 consultant embedded in a diagram editor used by French-speaking teams. You talk with the user about THEIR diagram, which is given to you as BPMN 2.0 XML (layout information removed) in each of their messages, always up to date.
+
+How to behave:
+- Answer in French, concise and concrete. Light markdown only: short paragraphs, "- " bullet lists, **bold**. No tables, no headings, no code blocks.
+- Refer to elements by their name (and id in backticks when it helps, e.g. \`Task_KYC\`).
+- Discuss, explain, challenge the model and ask clarifying questions when the intent is unclear. It is a conversation: take every remark of the user into account in later answers.
+- NEVER output BPMN XML.
+- Only when the user asks you to apply, make, propose or implement changes (or when the message says "MODE PROPOSITION"), end your answer with ONE block:
+<changes>[ ...array of changes... ]</changes>
+  Before the block, write one or two sentences summarising what you will propose. Split the work into small changes that the user can accept or refuse one by one (one concern per change, ordered so that each change makes sense even if a later one is refused). A change must not depend on an earlier change of the same block unless unavoidable; if it does, say so in "why".
+- Prefer the minimal set of changes that matches what was agreed in the conversation. When asked to review the whole diagram, propose each improvement as its own change.
+
+${OPS_SPEC}
+
+Example of a block:
+<changes>[{"title":"Relancer le client tous les jours","why":"La collecte des pièces peut durer et rien ne relance le client.","benefit":"Moins de dossiers bloqués sans action.","focus":["Task_KYC","Timer_Relance"],"ops":[{"op":"attach","ref":"Timer_Relance","to":"Task_KYC","event":"timer","interrupting":false,"name":"Chaque jour (x3)","timer":{"kind":"timeCycle","value":"R3/P1D"}},{"op":"append","ref":"Task_Relancer","after":"Timer_Relance","type":"bpmn:SendTask","name":"Relancer le client"},{"op":"append","ref":"End_Relance","after":"Task_Relancer","type":"bpmn:EndEvent","name":"Relance envoyée"}]}]</changes>`;
+
+/** Retire la DI (coordonnées) : inutile au modèle, et coûteuse en jetons. */
+export function stripDi(xml) {
+  return String(xml).replace(/<(\w+:)?BPMNDiagram\b[\s\S]*?<\/(\w+:)?BPMNDiagram>/g, '').replace(/\n\s*\n+/g, '\n');
+}
+
+export class AiError extends Error {
+  constructor(message, status = 502) { super(message); this.status = status; }
+}
+
+async function* sseLines(body) {
+  const decoder = new TextDecoder();
+  let buf = '';
+  for await (const chunk of body) {
+    buf += decoder.decode(chunk, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, i).replace(/\r$/, '');
+      buf = buf.slice(i + 1);
+      yield line;
+    }
+  }
+  if (buf) yield buf;
+}
 
 export function createAi(cfg) {
   const provider = (cfg.provider || 'anthropic').toLowerCase();
   const enabled = !!cfg.apiKey || (provider === 'openai' && !!cfg.baseUrl);
   const model = cfg.model || (provider === 'anthropic' ? 'claude-sonnet-5-5' : 'gpt-4.1');
-  const moddle = new BpmnModdle();
+  const timeout = cfg.timeoutMs || 300_000;
 
-  async function callAnthropic(system, messages) {
-    const res = await fetch((cfg.baseUrl || 'https://api.anthropic.com') + '/v1/messages', {
+  async function* streamAnthropic(system, messages, maxTokens, signal) {
+    const res = await fetch((cfg.baseUrl || 'https://api.anthropic.com').replace(/\/$/, '') + '/v1/messages', {
       method: 'POST',
       headers: { 'content-type': 'application/json', 'x-api-key': cfg.apiKey, 'anthropic-version': '2023-06-01' },
-      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, system, messages }),
-      signal: AbortSignal.timeout(cfg.timeoutMs || 240_000)
+      body: JSON.stringify({ model, max_tokens: maxTokens, system, messages, stream: true }),
+      signal
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new AiError(`Le fournisseur IA a répondu ${res.status} : ${body?.error?.message || 'erreur inconnue'}`, 502);
-    return (body.content || []).filter(b => b.type === 'text').map(b => b.text).join('');
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new AiError(`Le fournisseur IA a répondu ${res.status} : ${body?.error?.message || 'erreur inconnue'}`);
+    }
+    for await (const line of sseLines(res.body)) {
+      if (!line.startsWith('data:')) continue;
+      let ev; try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+      if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta') yield ev.delta.text;
+      if (ev.type === 'error') throw new AiError(`Erreur du fournisseur IA : ${ev.error?.message || 'inconnue'}`);
+    }
   }
 
-  async function callOpenAi(system, messages) {
+  async function* streamOpenAi(system, messages, maxTokens, signal) {
     const base = (cfg.baseUrl || 'https://api.openai.com/v1').replace(/\/$/, '');
     const headers = { 'content-type': 'application/json' };
     if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
     const res = await fetch(base + '/chat/completions', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ model, max_tokens: MAX_TOKENS, messages: [{ role: 'system', content: system }, ...messages] }),
-      signal: AbortSignal.timeout(cfg.timeoutMs || 240_000)
+      method: 'POST', headers, signal,
+      body: JSON.stringify({ model, max_tokens: maxTokens, stream: true, messages: [{ role: 'system', content: system }, ...messages] })
     });
-    const body = await res.json().catch(() => ({}));
-    if (!res.ok) throw new AiError(`Le fournisseur IA a répondu ${res.status} : ${body?.error?.message || 'erreur inconnue'}`, 502);
-    return body.choices?.[0]?.message?.content || '';
-  }
-
-  const call = (system, messages) => provider === 'anthropic' ? callAnthropic(system, messages) : callOpenAi(system, messages);
-
-  /** Contrôle structurel : XML lisible par bpmn-moddle, et chaque élément visible a sa DI. */
-  async function validate(xml) {
-    const problems = [];
-    let definitions;
-    try {
-      const r = await moddle.fromXML(xml, 'bpmn:Definitions');
-      definitions = r.rootElement;
-      for (const w of r.warnings || []) problems.push(w.message);
-    } catch (e) {
-      return [`XML invalide : ${e.message}`];
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new AiError(`Le fournisseur IA a répondu ${res.status} : ${body?.error?.message || 'erreur inconnue'}`);
     }
-    const withDi = new Set();
-    for (const diagram of definitions.diagrams || []) {
-      for (const el of diagram.plane?.planeElement || []) if (el.bpmnElement) withDi.add(el.bpmnElement.id);
+    for await (const line of sseLines(res.body)) {
+      if (!line.startsWith('data:')) continue;
+      const data = line.slice(5).trim();
+      if (data === '[DONE]') return;
+      let ev; try { ev = JSON.parse(data); } catch { continue; }
+      const t = ev.choices?.[0]?.delta?.content;
+      if (t) yield t;
     }
-    const visible = [];
-    const walk = container => {
-      for (const el of container.flowElements || []) {
-        visible.push(el);
-        if (el.flowElements) walk(el);
-      }
-      for (const a of container.artifacts || []) visible.push(a);
-      for (const lane of container.laneSets?.flatMap(s => s.lanes || []) || []) visible.push(lane);
-    };
-    for (const root of definitions.rootElements || []) {
-      if (root.$type === 'bpmn:Process') walk(root);
-      if (root.$type === 'bpmn:Collaboration') {
-        for (const p of root.participants || []) visible.push(p);
-        for (const m of root.messageFlows || []) visible.push(m);
-      }
-    }
-    const missing = visible.filter(el => !withDi.has(el.id) && el.$type !== 'bpmn:DataObject');
-    if (missing.length) problems.push(`Éléments sans représentation graphique (DI) : ${missing.slice(0, 15).map(e => e.id).join(', ')}`);
-    return problems;
-  }
-
-  function parse(text) {
-    const explanation = /<explanation>([\s\S]*?)<\/explanation>/i.exec(text)?.[1]?.trim() || '';
-    let xml = /<bpmn>([\s\S]*?)<\/bpmn>/i.exec(text)?.[1]?.trim() || '';
-    xml = xml.replace(/^```(?:xml)?\s*/i, '').replace(/\s*```$/, '');
-    return { explanation, xml };
   }
 
   /**
-   * turns: [{ request, proposalXml?, explanation? }] — le dernier tour n'a pas encore de proposition.
+   * history : [{ role: 'user'|'assistant', content }] — le dernier message est celui de l'utilisateur.
+   * Le diagramme à jour est joint au dernier message ; mode 'propose' force un bloc <changes>.
    */
-  async function propose({ xml, turns }) {
-    const messages = [];
-    turns.forEach((t, i) => {
-      const content = i === 0
-        ? `Diagramme actuel :\n<current>\n${xml}\n</current>\n\nDemande : ${t.request}`
-        : `Précision sur ta proposition précédente : ${t.request}\nRepars de ta dernière proposition et renvoie le diagramme complet.`;
-      messages.push({ role: 'user', content });
-      if (t.proposalXml) messages.push({ role: 'assistant', content: `<explanation>${t.explanation || ''}</explanation>\n<bpmn>${t.proposalXml}</bpmn>` });
-    });
-
-    let text = await call(SYSTEM_PROMPT, messages);
-    let out = parse(text);
-    let problems = out.xml ? await validate(out.xml) : ['Réponse sans bloc <bpmn>.'];
-
-    // Une passe de correction automatique si le résultat est invalide.
-    if (problems.length) {
-      messages.push({ role: 'assistant', content: text });
-      messages.push({ role: 'user', content: `Ta réponse pose ces problèmes :\n- ${problems.join('\n- ')}\nCorrige-les et renvoie les deux blocs complets.` });
-      text = await call(SYSTEM_PROMPT, messages);
-      out = parse(text);
-      problems = out.xml ? await validate(out.xml) : ['Réponse sans bloc <bpmn>.'];
-      if (problems.length && !out.xml) throw new AiError("L'IA n'a pas renvoyé de diagramme exploitable. Reformulez la demande.", 502);
+  function buildMessages({ xml, history, mode, selection }) {
+    const msgs = [];
+    for (const m of history) {
+      const role = m.role === 'assistant' ? 'assistant' : 'user';
+      if (msgs.length && msgs.at(-1).role === role) msgs.at(-1).content += `\n\n${m.content}`;
+      else msgs.push({ role, content: String(m.content) });
     }
-    return { explanation: out.explanation, xml: out.xml, warnings: problems, model };
+    if (!msgs.length || msgs[0].role !== 'user') msgs.unshift({ role: 'user', content: '(début de conversation)' });
+    const last = msgs.at(-1);
+    if (last.role !== 'user') throw new AiError('Le dernier message doit venir de l\'utilisateur.', 400);
+    const sel = selection?.length ? `\nÉléments sélectionnés dans l'éditeur : ${selection.map(s => `${s.name || '(sans nom)'} [${s.id}]`).join(', ')}\n` : '';
+    const propose = mode === 'propose' ? '\n\nMODE PROPOSITION : propose maintenant les modifications issues de notre échange, sous forme de bloc <changes>.' : '';
+    last.content = `Diagramme actuel :\n<diagram>\n${stripDi(xml)}\n</diagram>\n${sel}\n${last.content}${propose}`;
+    return msgs;
   }
 
-  return { enabled, model, provider, propose, validate };
-}
+  /** Générateur de morceaux de texte. */
+  async function* chat({ xml, history, mode, selection }, signal) {
+    const messages = buildMessages({ xml, history, mode, selection });
+    const maxTokens = mode === 'propose' ? 16000 : 6000;
+    const abort = AbortSignal.any([signal, AbortSignal.timeout(timeout)].filter(Boolean));
+    const gen = provider === 'anthropic' ? streamAnthropic(SYSTEM_PROMPT, messages, maxTokens, abort) : streamOpenAi(SYSTEM_PROMPT, messages, maxTokens, abort);
+    yield* gen;
+  }
 
-export class AiError extends Error {
-  constructor(message, status = 500) { super(message); this.status = status; }
+  return { enabled, model, provider, chat, buildMessages };
 }

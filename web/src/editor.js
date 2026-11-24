@@ -8,17 +8,17 @@ import 'bpmn-js-token-simulation/assets/css/bpmn-js-token-simulation.css';
 import '@bpmn-io/diagram-js-canvas-lock/assets/canvas-lock.css';
 
 import { api } from './api.js';
-import { $, $$, h, esc, fmtTime, fmtDate, toast, dialog, download, safeFilename } from './dom.js';
+import { $, $$, esc, fmtTime, toast, dialog, download, safeFilename } from './dom.js';
 import { TranslateModule } from './i18n.js';
 import { createProperties } from './properties.js';
 import { createAssistant } from './assistant.js';
 import { createHelp } from './help.js';
 import { createSimulation } from './simulation.js';
 import { createHistory } from './history.js';
-import { createSharing } from './sharing.js';
 
 const RENEW_MS = 30_000;
 const POLL_MS = 20_000;
+const SIDE_MIN = 300, SIDE_MAX = 900;
 
 // crypto.randomUUID n'existe qu'en contexte sécurisé (HTTPS ou localhost) : getRandomValues marche partout.
 function randomId() {
@@ -26,38 +26,42 @@ function randomId() {
   return [...b].map(x => x.toString(16).padStart(2, '0')).join('');
 }
 
+/** Identifiant de l'onglet : le verrou appartient à un onglet, pas seulement à une personne. */
 function holderId() {
   let id = sessionStorage.getItem('bpmn.holder');
   if (!id) { id = randomId(); sessionStorage.setItem('bpmn.holder', id); }
   return id;
 }
 
-export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBack }) {
+export async function openEditor(root, { id, user, cfg, onBack }) {
   let diagram;
   try { diagram = await api.get(id); }
   catch (e) {
-    root.innerHTML = `<main class="center-page"><div class="card narrow"><h1>Diagramme introuvable</h1><p class="muted">${esc(e.message)}</p>${onBack ? '<button class="btn" id="back">Retour</button>' : ''}</div></main>`;
-    $('#back', root)?.addEventListener('click', onBack);
+    root.innerHTML = `<main class="center-page"><div class="card narrow"><h1>Diagramme introuvable</h1><p class="muted">${esc(e.message)}</p><button class="btn" id="back">Retour à la liste</button></div></main>`;
+    $('#back', root).addEventListener('click', onBack);
     return () => {};
   }
 
-  const role = diagram.role; // admin | edit | view
-  const canEdit = role === 'admin' || role === 'edit';
+  const isAdmin = user.role === 'admin';
   const holder = holderId();
+  const sideW = Math.min(SIDE_MAX, Math.max(SIDE_MIN, Number(localStorage.getItem('bpmn.sideWidth')) || 380));
 
-  root.innerHTML = `<div class="ed">
+  root.innerHTML = `<div class="ed" style="--side-w:${sideW}px">
     <header class="ed-top">
-      ${onBack ? '<button class="btn icon ghost" id="back" title="Retour à la liste" aria-label="Retour à la liste">←</button>' : '<span class="brand-mark sm" aria-hidden="true"></span>'}
+      <button class="btn icon ghost" id="back" title="Retour à la liste" aria-label="Retour à la liste">←</button>
       <div class="ed-titlebox"><h1 class="ed-title" id="title"></h1><span id="status" class="pill"></span></div>
       <div class="ed-actions">
         <span class="grp edit-only">
           <button class="btn icon ghost" id="undo" title="Annuler (Ctrl+Z)" aria-label="Annuler">↶</button>
           <button class="btn icon ghost" id="redo" title="Rétablir (Ctrl+Y)" aria-label="Rétablir">↷</button>
         </span>
-        ${canEdit ? '<button class="btn primary" id="edit">Modifier</button><button class="btn primary edit-only" id="save">Enregistrer</button><button class="btn edit-only" id="done">Terminer</button>' : ''}
+        <button class="btn primary" id="edit">Modifier</button>
+        <button class="btn primary edit-only" id="save">Enregistrer</button>
+        <button class="btn edit-only" id="done">Terminer</button>
         <button class="btn" id="sim" aria-pressed="false">Simuler</button>
         <div class="menu-wrap"><button class="btn" id="exp" aria-haspopup="true">Exporter</button>
           <div class="menu" id="expMenu" hidden>
+            <button data-x="link">Copier le lien de la page</button>
             <button data-x="bpmn">Fichier .bpmn</button><button data-x="svg">Image SVG</button><button data-x="png">Image PNG</button>
           </div></div>
         <button class="btn icon ghost side-toggle" id="sideToggle" title="Panneau latéral" aria-label="Afficher ou masquer le panneau">☰</button>
@@ -69,19 +73,18 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
         <div class="ed-banner" id="banner" hidden></div>
         <div class="sim-bar" id="simBar" hidden></div>
       </div>
+      <div class="side-resize" id="resize" role="separator" aria-orientation="vertical" aria-label="Largeur du panneau" tabindex="0"></div>
       <aside class="ed-side" id="side">
         <nav class="tabs" role="tablist">
           <button role="tab" data-tab="props" aria-selected="true">Propriétés</button>
-          <button role="tab" data-tab="ai">Assistant</button>
+          <button role="tab" data-tab="ai">Assistant IA</button>
           <button role="tab" data-tab="help">Aide</button>
           <button role="tab" data-tab="history">Historique</button>
-          ${isAdmin ? '<button role="tab" data-tab="share">Partage</button>' : ''}
         </nav>
         <section class="tab-body" data-panel="props"></section>
         <section class="tab-body" data-panel="ai" hidden></section>
         <section class="tab-body" data-panel="help" hidden></section>
         <section class="tab-body" data-panel="history" hidden></section>
-        ${isAdmin ? '<section class="tab-body" data-panel="share" hidden></section>' : ''}
       </aside>
     </div>
   </div>`;
@@ -97,33 +100,38 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
   // ---------- état partagé avec les panneaux ----------
   const listeners = {};
   const ctx = {
-    modeler, id, role, canEdit, isAdmin, cfg, shared,
+    modeler, id, user, cfg, isAdmin, canEdit: true,
     editing: false,
     previewing: false,
     simulating: false,
     version: diagram.version,
+    rev: diagram.rev,
     name: diagram.name,
     pendingMessage: null,
     on(evt, fn) { (listeners[evt] ||= []).push(fn); },
     emit(evt, data) { (listeners[evt] || []).forEach(fn => fn(data)); },
-    author: () => localStorage.getItem('bpmn.author') || '',
     async getXml() { return (await modeler.saveXML({ format: true })).xml; },
     async importXml(xml, { fit = true } = {}) {
       const viewbox = fit ? null : modeler.get('canvas').viewbox();
       const r = await modeler.importXML(xml);
-      if (viewbox) modeler.get('canvas').viewbox(viewbox); else modeler.get('canvas').zoom('fit-viewport', 'auto');
+      if (viewbox) modeler.get('canvas').viewbox(viewbox); else fitView();
       applyLock();
       return r;
     },
     markDirty(message) { dirty = true; if (message) ctx.pendingMessage = message; refreshUi(); },
     applyLock: () => applyLock(),
-    showBanner, hideBanner,
-    selectTab
+    showBanner, hideBanner, selectTab
   };
 
   let dirty = false;
   let lock = diagram.lock;
   let renewTimer = null, pollTimer = null;
+
+  function fitView() {
+    const canvas = modeler.get('canvas');
+    canvas.zoom('fit-viewport', 'auto');
+    if (canvas.zoom() > 1.2) canvas.zoom(1.2, 'auto');
+  }
 
   function applyLock() {
     const editable = ctx.editing && !ctx.previewing && !ctx.simulating;
@@ -131,15 +139,11 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
     edEl.classList.toggle('readonly', !editable);
   }
 
-  // ---------- bandeau sur le canevas (aperçu IA, version) ----------
-  function showBanner(contentEl) {
-    const b = $('#banner', root);
-    b.replaceChildren(contentEl);
-    b.hidden = false;
-  }
+  // ---------- bandeau sur le canevas ----------
+  function showBanner(contentEl) { const b = $('#banner', root); b.replaceChildren(contentEl); b.hidden = false; }
   function hideBanner() { const b = $('#banner', root); b.hidden = true; b.replaceChildren(); }
 
-  // ---------- onglets ----------
+  // ---------- onglets et panneau redimensionnable ----------
   function selectTab(name) {
     $$('.tabs [role=tab]', root).forEach(t => t.setAttribute('aria-selected', String(t.dataset.tab === name)));
     $$('.tab-body', root).forEach(p => { p.hidden = p.dataset.panel !== name; });
@@ -149,62 +153,78 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
   $('.tabs', root).addEventListener('click', e => { const t = e.target.closest('[role=tab]'); if (t) selectTab(t.dataset.tab); });
   $('#sideToggle', root).addEventListener('click', () => edEl.classList.toggle('side-open'));
 
+  const resizer = $('#resize', root);
+  const setSide = w => {
+    const v = Math.round(Math.min(SIDE_MAX, Math.max(SIDE_MIN, w, 0)));
+    edEl.style.setProperty('--side-w', `${v}px`);
+    localStorage.setItem('bpmn.sideWidth', String(v));
+  };
+  resizer.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    resizer.setPointerCapture(e.pointerId);
+    edEl.classList.add('resizing');
+    const move = ev => setSide(edEl.getBoundingClientRect().right - ev.clientX);
+    const up = () => { resizer.removeEventListener('pointermove', move); resizer.removeEventListener('pointerup', up); edEl.classList.remove('resizing'); modeler.get('canvas').resized(); };
+    resizer.addEventListener('pointermove', move);
+    resizer.addEventListener('pointerup', up);
+  });
+  resizer.addEventListener('keydown', e => {
+    const cur = parseInt(getComputedStyle(edEl).getPropertyValue('--side-w'), 10) || sideW;
+    if (e.key === 'ArrowLeft') { setSide(cur + 20); e.preventDefault(); }
+    if (e.key === 'ArrowRight') { setSide(cur - 20); e.preventDefault(); }
+  });
+  resizer.addEventListener('dblclick', () => setSide(380));
+
   // ---------- titre, statut ----------
   function refreshUi() {
     $('#title', root).textContent = ctx.name;
     document.title = `${ctx.name} · Éditeur BPMN`;
     const st = $('#status', root);
+    const otherHolder = lock && lock.holder !== holder;
     if (ctx.editing) {
       st.className = 'pill ok';
       st.textContent = dirty ? 'Modifications non enregistrées' : `Vous modifiez · v${ctx.version}`;
-    } else if (lock && lock.holder !== holder) {
+    } else if (otherHolder) {
       st.className = 'pill warn';
-      st.textContent = `${lock.author || 'Quelqu\'un'} modifie depuis ${fmtTime(lock.since)}`;
+      st.textContent = lock.userId === user.id ? `Vous modifiez dans un autre onglet` : `${lock.author || 'Quelqu\'un'} modifie depuis ${fmtTime(lock.since)}`;
     } else {
       st.className = 'pill';
-      st.textContent = `${canEdit ? 'Lecture' : 'Lecture seule'} · v${ctx.version}`;
+      st.textContent = `Lecture · v${ctx.version}`;
     }
     edEl.classList.toggle('editing', ctx.editing);
     edEl.classList.toggle('dirty', dirty);
-    const editBtn = $('#edit', root);
-    if (editBtn) editBtn.disabled = !!(lock && lock.holder !== holder && !isAdmin);
+    $('#edit', root).disabled = !!(otherHolder && !isAdmin && lock.userId !== user.id);
     const cs = modeler.get('commandStack');
-    $('#undo', root).disabled = !cs.canUndo();
-    $('#redo', root).disabled = !cs.canRedo();
+    $('#undo', root).disabled = !cs.canUndo() || ctx.previewing;
+    $('#redo', root).disabled = !cs.canRedo() || ctx.previewing;
+    $('#save', root).disabled = ctx.previewing;
   }
 
   modeler.on('commandStack.changed', () => {
     if (ctx.editing && !ctx.previewing) dirty = true;
     refreshUi();
   });
+  ctx.on('mode', refreshUi);
 
   // ---------- édition : verrou ----------
-  async function ensureAuthor() {
-    if (ctx.author()) return true;
-    const name = await dialog({
-      title: 'Votre nom',
-      body: 'Il s\'affiche aux autres personnes pendant que vous modifiez, et dans l\'historique des versions.',
-      input: { placeholder: 'Prénom Nom', autocomplete: 'name' },
-      buttons: [{ label: 'Annuler', value: null }, { label: 'Continuer', value: '$input', primary: true }]
-    });
-    if (!name?.trim()) return false;
-    localStorage.setItem('bpmn.author', name.trim().slice(0, 80));
-    return true;
-  }
-
   async function startEditing() {
-    if (!(await ensureAuthor())) return;
-    let r = await api.lock(id, holder, ctx.author());
-    if (!r.acquired && isAdmin) {
-      const force = await dialog({ title: 'Diagramme verrouillé', body: `${r.lock.author || 'Quelqu\'un'} modifie ce diagramme depuis ${fmtTime(r.lock.since)}. En tant qu'administrateur, vous pouvez reprendre la main : ses modifications non enregistrées seront perdues.`, buttons: [{ label: 'Annuler', value: false }, { label: 'Reprendre la main', value: true, danger: true, primary: true }] });
+    let r = await api.lock(id, holder);
+    if (!r.acquired && (isAdmin || r.lock.userId === user.id)) {
+      const mine = r.lock.userId === user.id;
+      const force = await dialog({
+        title: mine ? 'Déjà ouvert dans un autre onglet' : 'Diagramme verrouillé',
+        body: mine ? 'Vous modifiez déjà ce diagramme dans un autre onglet ou navigateur. Reprendre la main ici fera perdre les modifications non enregistrées de l\'autre onglet.'
+          : `${r.lock.author || 'Quelqu\'un'} modifie ce diagramme depuis ${fmtTime(r.lock.since)}. En tant qu'administrateur, vous pouvez reprendre la main : ses modifications non enregistrées seront perdues.`,
+        buttons: [{ label: 'Annuler', value: false }, { label: 'Reprendre la main', value: true, danger: true, primary: true }]
+      });
       if (!force) return;
-      await api.forceUnlock(id);
-      r = await api.lock(id, holder, ctx.author());
+      if (mine) await api.unlock(id, r.lock.holder).catch(() => {});
+      else await api.forceUnlock(id).catch(() => {});
+      r = await api.lock(id, holder);
     }
     if (!r.acquired) { lock = r.lock; refreshUi(); toast(`${r.lock.author || 'Quelqu\'un'} modifie déjà ce diagramme.`, 'error'); return; }
-    // Recharger si une version plus récente existe.
     const fresh = await api.get(id);
-    if (fresh.version !== ctx.version) { ctx.version = fresh.version; await ctx.importXml(fresh.xml, { fit: false }); toast(`Version ${fresh.version} chargée.`); }
+    if (fresh.rev !== ctx.rev) { ctx.rev = fresh.rev; ctx.version = fresh.version; await ctx.importXml(fresh.xml, { fit: false }); toast(`Version ${fresh.version} chargée.`); }
     lock = r.lock;
     ctx.editing = true;
     modeler.get('commandStack').clear();
@@ -218,13 +238,13 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
 
   async function renewLock() {
     try {
-      const r = await api.lock(id, holder, ctx.author());
+      const r = await api.lock(id, holder);
       if (!r.acquired) {
         lock = r.lock;
         stopEditingLocal();
-        dialog({ title: 'Verrou perdu', body: `${r.lock.author || 'Quelqu\'un'} a repris la main sur ce diagramme. Vos modifications non enregistrées sont toujours à l'écran : exportez-les en .bpmn si besoin avant de recharger.`, buttons: [{ label: 'Compris', value: true, primary: true }] });
+        dialog({ title: 'Verrou perdu', body: `${r.lock.author || 'Quelqu\'un'} a repris la main sur ce diagramme. Vos modifications non enregistrées sont toujours à l'écran : exportez-les en .bpmn si besoin avant de recharger la page.`, buttons: [{ label: 'Compris', value: true, primary: true }] });
       }
-    } catch { /* réseau : on réessaie au prochain tour */ }
+    } catch { /* réseau : nouvel essai au prochain tour */ }
   }
 
   function stopEditingLocal() {
@@ -236,11 +256,12 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
   }
 
   async function stopEditing() {
+    if (ctx.previewing) ctx.emit('editing', false); // termine une revue IA ou une consultation de version
     if (dirty) {
       const choice = await dialog({ title: 'Modifications non enregistrées', body: 'Voulez-vous enregistrer avant de quitter le mode édition ?', buttons: [{ label: 'Continuer à modifier', value: null }, { label: 'Abandonner', value: 'discard', danger: true }, { label: 'Enregistrer', value: 'save', primary: true }] });
       if (!choice) return false;
       if (choice === 'save' && !(await save())) return false;
-      if (choice === 'discard') { const d = await api.get(id); ctx.version = d.version; await ctx.importXml(d.xml, { fit: false }); dirty = false; }
+      if (choice === 'discard') { const d = await api.get(id); ctx.rev = d.rev; ctx.version = d.version; await ctx.importXml(d.xml, { fit: false }); dirty = false; }
     }
     stopEditingLocal();
     await api.unlock(id, holder).catch(() => {});
@@ -253,8 +274,8 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
     if (!ctx.editing || ctx.previewing) return false;
     const xml = await ctx.getXml();
     try {
-      const d = await api.save(id, { xml, baseVersion: ctx.version, holder, author: ctx.author(), message: ctx.pendingMessage });
-      ctx.version = d.version;
+      const d = await api.save(id, { xml, baseRev: ctx.rev, holder, message: ctx.pendingMessage });
+      ctx.rev = d.rev; ctx.version = d.version;
       ctx.pendingMessage = null;
       dirty = false;
       refreshUi();
@@ -264,9 +285,9 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
     } catch (e) {
       if (e.status === 409) {
         const c = e.body.current || {};
-        const choice = await dialog({ title: 'Conflit de version', body: `Une version ${c.version} a été enregistrée par ${c.updatedBy || 'quelqu\'un'} à ${fmtTime(c.updatedAt)}. Téléchargez votre version pour ne rien perdre, puis rechargez la version la plus récente.`, buttons: [{ label: 'Télécharger ma version', value: 'dl' }, { label: 'Recharger la plus récente', value: 'reload', primary: true }] });
+        const choice = await dialog({ title: 'Conflit de version', body: `La version ${c.version} a été enregistrée par ${c.updatedBy || 'quelqu\'un'} à ${fmtTime(c.updatedAt)}. Téléchargez votre version pour ne rien perdre, puis rechargez la plus récente.`, buttons: [{ label: 'Télécharger ma version', value: 'dl' }, { label: 'Recharger la plus récente', value: 'reload', primary: true }] });
         if (choice === 'dl') download(`${safeFilename(ctx.name)}-ma-version.bpmn`, xml, 'application/xml');
-        if (choice === 'reload') { const d = await api.get(id); ctx.version = d.version; await ctx.importXml(d.xml, { fit: false }); dirty = false; refreshUi(); }
+        if (choice === 'reload') { const d = await api.get(id); ctx.rev = d.rev; ctx.version = d.version; await ctx.importXml(d.xml, { fit: false }); dirty = false; refreshUi(); }
       } else if (e.status === 423) {
         lock = e.body.lock;
         stopEditingLocal();
@@ -283,8 +304,8 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
       const d = await api.get(id);
       lock = d.lock;
       ctx.name = d.name;
-      if (d.version !== ctx.version && !ctx.simulating) {
-        ctx.version = d.version;
+      if (d.rev !== ctx.rev && !ctx.simulating) {
+        ctx.rev = d.rev; ctx.version = d.version;
         await ctx.importXml(d.xml, { fit: false });
         toast(`Mis à jour par ${d.updatedBy || 'quelqu\'un'} · v${d.version}`);
         ctx.emit('saved', d);
@@ -295,36 +316,34 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
   pollTimer = setInterval(poll, POLL_MS);
 
   // ---------- boutons ----------
-  $('#back', root)?.addEventListener('click', async () => { if (await leave()) onBack(); });
-  $('#edit', root)?.addEventListener('click', startEditing);
-  $('#done', root)?.addEventListener('click', stopEditing);
-  $('#save', root)?.addEventListener('click', save);
+  $('#back', root).addEventListener('click', async () => { if (await leave()) onBack(); });
+  $('#edit', root).addEventListener('click', startEditing);
+  $('#done', root).addEventListener('click', stopEditing);
+  $('#save', root).addEventListener('click', save);
   $('#undo', root).addEventListener('click', () => modeler.get('commandStack').undo());
   $('#redo', root).addEventListener('click', () => modeler.get('commandStack').redo());
 
-  const expBtn = $('#exp', root), expMenu = $('#expMenu', root);
-  expBtn.addEventListener('click', () => { expMenu.hidden = !expMenu.hidden; });
+  const expMenu = $('#expMenu', root);
+  $('#exp', root).addEventListener('click', () => { expMenu.hidden = !expMenu.hidden; });
+  const closeMenu = e => { if (!e.target.closest('.menu-wrap')) expMenu.hidden = true; };
   document.addEventListener('click', closeMenu);
-  function closeMenu(e) { if (!e.target.closest('.menu-wrap')) expMenu.hidden = true; }
   expMenu.addEventListener('click', async e => {
     const kind = e.target.dataset.x;
     if (!kind) return;
     expMenu.hidden = true;
     const base = safeFilename(ctx.name);
+    if (kind === 'link') copyText(location.href);
     if (kind === 'bpmn') download(`${base}.bpmn`, await ctx.getXml(), 'application/xml');
     if (kind === 'svg') download(`${base}.svg`, (await modeler.saveSVG()).svg, 'image/svg+xml');
     if (kind === 'png') download(`${base}.png`, await svgToPng((await modeler.saveSVG()).svg), 'image/png');
   });
 
-  function onKey(e) {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); }
-  }
+  const onKey = e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); save(); } };
   document.addEventListener('keydown', onKey);
-
-  function onBeforeUnload(e) {
+  const onBeforeUnload = e => {
     if (ctx.editing) api.unlockBeacon(id, holder);
     if (dirty) { e.preventDefault(); e.returnValue = ''; }
-  }
+  };
   window.addEventListener('beforeunload', onBeforeUnload);
 
   async function leave() {
@@ -335,7 +354,7 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
   // ---------- chargement ----------
   try {
     const { warnings } = await modeler.importXML(diagram.xml);
-    modeler.get('canvas').zoom('fit-viewport', 'auto');
+    fitView();
     if (warnings.length) toast(`${warnings.length} avertissement(s) à l'ouverture : certains éléments peuvent manquer.`, 'error');
   } catch (e) {
     toast(`Impossible d'afficher ce diagramme : ${e.message}`, 'error');
@@ -347,12 +366,10 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
     createAssistant(ctx, $('[data-panel=ai]', root)),
     createHelp(ctx, $('[data-panel=help]', root)),
     createHistory(ctx, $('[data-panel=history]', root)),
-    createSimulation(ctx, { button: $('#sim', root), bar: $('#simBar', root) }),
-    isAdmin ? createSharing(ctx, $('[data-panel=share]', root)) : null
-  ].filter(Boolean);
+    createSimulation(ctx, { button: $('#sim', root), bar: $('#simBar', root) })
+  ];
   refreshUi();
 
-  // Fermeture (changement de page dans l'application)
   return async () => {
     await leave();
     clearInterval(renewTimer); clearInterval(pollTimer);
@@ -361,7 +378,23 @@ export async function openEditor(root, { id, isAdmin, cfg, shared = false, onBac
     window.removeEventListener('beforeunload', onBeforeUnload);
     panels.forEach(p => p?.destroy?.());
     modeler.destroy();
+    delete window.__bpmnModeler;
   };
+}
+
+async function copyText(text) {
+  try {
+    if (navigator.clipboard) await navigator.clipboard.writeText(text);
+    else {
+      const t = Object.assign(document.createElement('textarea'), { value: text });
+      t.style.position = 'fixed'; t.style.opacity = '0';
+      document.body.append(t); t.select();
+      const ok = document.execCommand('copy');
+      t.remove();
+      if (!ok) throw new Error('copy');
+    }
+    toast('Lien copié : toute personne connectée pourra ouvrir ce diagramme.');
+  } catch { toast('Copie impossible : copiez l\'adresse depuis la barre du navigateur.', 'error'); }
 }
 
 function svgToPng(svg) {
