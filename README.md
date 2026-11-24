@@ -43,7 +43,7 @@ Tests de l'API : `npm test`.
 | `LLM_MODEL` | non | Par défaut `claude-sonnet-5-5` avec Anthropic. |
 | `LLM_BASE_URL` | non | URL de l'API, par ex. `https://api.scaleway.ai/v1` ou l'URL d'un proxy LiteLLM. |
 | `AI_RATE_LIMIT_PER_HOUR` | non | Nombre d'appels IA par heure et par adresse IP (40 par défaut). |
-| `COOKIE_SECURE` | non | `true` par défaut en production. Mettre `false` seulement si le site est servi en HTTP. |
+| `COOKIE_SECURE` | non | `auto` par défaut : cookie `Secure` seulement si la requête arrive en HTTPS (`X-Forwarded-Proto` compris). `true` ou `false` pour forcer. |
 | `LISTEN_HOST` | non | Interface d'écoute, `0.0.0.0` par défaut. |
 | `TRUST_PROXY` | non | `true` par défaut, adapté derrière le proxy de Coolify. Mettre `false` si le conteneur est exposé directement. |
 

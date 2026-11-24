@@ -23,7 +23,7 @@ before(async () => {
   });
   await new Promise(r => llm.listen(0, r));
   app = await buildApp({
-    dbFile: ':memory:', adminPassword: PASSWORD, secureCookies: false,
+    dbFile: ':memory:', adminPassword: PASSWORD, secureCookies: 'auto',
     ai: { provider: 'anthropic', apiKey: 'k', baseUrl: `http://127.0.0.1:${llm.address().port}` }
   });
 });
@@ -39,6 +39,13 @@ test('connexion administrateur', async () => {
   cookie = r.headers['set-cookie'].split(';')[0];
   assert.equal((await req('GET', '/api/config')).json().admin, true);
   assert.equal((await req('GET', '/api/diagrams', { auth: false })).statusCode, 401);
+});
+
+test('cookie de session : Secure seulement en HTTPS (mode auto)', async () => {
+  const http = await req('POST', '/api/login', { body: { password: PASSWORD }, auth: false });
+  assert.doesNotMatch(http.headers['set-cookie'], /Secure/i);
+  const https = await req('POST', '/api/login', { body: { password: PASSWORD }, auth: false, headers: { 'x-forwarded-proto': 'https' } });
+  assert.match(https.headers['set-cookie'], /Secure/i);
 });
 
 test('cycle complet : création, verrou, enregistrement, conflit, historique, partage', async () => {

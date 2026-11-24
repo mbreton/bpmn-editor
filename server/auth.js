@@ -19,11 +19,14 @@ export function createAuth({ db, adminPassword, sessionSecret, secureCookies }) 
     return timingSafeEqual(sha(candidate), sha(adminPassword));
   }
 
-  function issueSession(reply) {
+  // secureCookies : true | false | 'auto' (Secure seulement si la requête arrive en HTTPS,
+  // y compris derrière un proxy qui transmet X-Forwarded-Proto).
+  function issueSession(reply, req) {
     const exp = Date.now() + SESSION_TTL_MS;
     const payload = `admin.${exp}`;
+    const secure = secureCookies === 'auto' ? req.protocol === 'https' : !!secureCookies;
     reply.setCookie(SESSION_COOKIE, `${payload}.${sign(payload)}`, {
-      path: '/', httpOnly: true, sameSite: 'strict', secure: secureCookies, maxAge: SESSION_TTL_MS / 1000
+      path: '/', httpOnly: true, sameSite: 'strict', secure, maxAge: SESSION_TTL_MS / 1000
     });
   }
 

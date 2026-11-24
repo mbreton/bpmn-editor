@@ -52,7 +52,7 @@ export async function buildApp(config) {
 
   app.post('/api/login', { config: { rateLimit: { max: 10, timeWindow: '10 minutes' } } }, async (req, reply) => {
     if (!auth.checkPassword(req.body?.password)) return fail(reply, 401, 'Mot de passe incorrect.');
-    auth.issueSession(reply);
+    auth.issueSession(reply, req);
     return { ok: true };
   });
 

@@ -7,6 +7,12 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)));
 
 if (!env.ADMIN_PASSWORD) {
   console.warn('[bpmn-editor] ADMIN_PASSWORD non défini : la connexion administrateur est désactivée (seuls les liens de partage existants fonctionnent).');
+} else {
+  // Diagnostic sans révéler le secret : pièges fréquents des interfaces de variables d'environnement.
+  const pw = env.ADMIN_PASSWORD;
+  if (pw !== pw.trim()) console.warn('[bpmn-editor] ADMIN_PASSWORD commence ou finit par un espace : il fait partie du mot de passe.');
+  if (/^(["']).*\1$/.test(pw)) console.warn('[bpmn-editor] ADMIN_PASSWORD est entouré de guillemets : ils font partie du mot de passe.');
+  console.log(`[bpmn-editor] connexion administrateur activée (mot de passe de ${pw.length} caractères).`);
 }
 
 const app = await buildApp({
@@ -14,7 +20,7 @@ const app = await buildApp({
   webRoot: env.WEB_ROOT || join(root, 'dist'),
   adminPassword: env.ADMIN_PASSWORD,
   sessionSecret: env.SESSION_SECRET,
-  secureCookies: env.COOKIE_SECURE ? env.COOKIE_SECURE === 'true' : env.NODE_ENV === 'production',
+  secureCookies: env.COOKIE_SECURE === 'true' ? true : env.COOKIE_SECURE === 'false' ? false : 'auto',
   trustProxy: env.TRUST_PROXY ? (env.TRUST_PROXY === 'true' ? true : env.TRUST_PROXY === 'false' ? false : env.TRUST_PROXY) : true,
   aiRateLimit: env.AI_RATE_LIMIT_PER_HOUR ? Number(env.AI_RATE_LIMIT_PER_HOUR) : undefined,
   ai: {

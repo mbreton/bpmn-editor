@@ -59,6 +59,11 @@ function renderLogin() {
     e.preventDefault();
     try {
       await api.login($('#pw').value);
+      const after = await api.config();
+      if (!after.admin) {
+        $('#err').textContent = 'Mot de passe accepté, mais le navigateur n\'a pas conservé la session. Vérifiez que la variable COOKIE_SECURE n\'est pas forcée à true alors que le site est en HTTP.';
+        return;
+      }
       route();
     } catch (err) {
       $('#err').textContent = err.status === 429 ? 'Trop de tentatives, réessayez dans quelques minutes.' : err.message;
