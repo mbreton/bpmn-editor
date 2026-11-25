@@ -87,9 +87,14 @@ export function createApplier(modeler) {
   function labelClashes(lbl) {
     const r = inflate(boxOf(lbl), 1);
     const owner = lbl.labelTarget;
-    return registry.getAll().filter(e => e !== lbl && e !== owner && e.parent && Number.isFinite(e.width) && !e.waypoints
+    const shapesHit = registry.getAll().filter(e => e !== lbl && e !== owner && e.parent && Number.isFinite(e.width) && !e.waypoints
       && !isContainerShape(e) && !is(e, 'bpmn:Collaboration') && !is(e, 'bpmn:Process') && e !== owner?.host
       && hit(r, boxOf(e)));
+    // un trait qui barre le libellé (sauf le flux qu'il nomme)
+    const core = inflate(boxOf(lbl), -1);
+    const linesHit = registry.filter(e => e.waypoints && e !== owner && !is(e, 'bpmn:Association')
+      && e.waypoints.some((p, i) => i > 0 && segmentHits(e.waypoints[i - 1], p, core)));
+    return [...shapesHit, ...linesHit];
   }
   /** Déplace un libellé externe qui recouvre un élément ou un autre libellé vers une place libre proche. */
   function freeLabel(lbl) {
@@ -110,6 +115,11 @@ export function createApplier(modeler) {
       { x: anchor.x + ow + 5, y: anchor.y + oh }, { x: anchor.x - ow - 5 - w, y: anchor.y + oh },
       { x: anchor.x + ow + 5, y: anchor.y - oh - h }, { x: anchor.x - ow - 5 - w, y: anchor.y - oh - h }
     ];
+    // puis une recherche plus large autour (pas de 10 px, jusqu'à 70 px), la plus proche d'abord
+    const ring = [];
+    for (let dx = -70; dx <= 70; dx += 10) for (let dy = -60; dy <= 60; dy += 10) ring.push({ x: anchor.x - w / 2 + dx, y: anchor.y + oh + 5 + dy, d: Math.hypot(dx, dy) });
+    ring.sort((a, b) => a.d - b.d);
+    cands.push(...ring);
     for (const p of cands) {
       modeling.moveShape(lbl, { x: Math.round(p.x - lbl.x), y: Math.round(p.y - lbl.y) });
       if (!labelClashes(lbl).length) return true;
