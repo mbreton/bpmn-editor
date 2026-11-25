@@ -294,7 +294,8 @@ export async function buildApp(config) {
     const name = req.body?.name;
     if (name !== undefined && name !== '' && !str(name)) return fail(reply, 400, 'Nom invalide (200 caractères max).');
     try {
-      const d = await diagrams.duplicate(req.params.id, { name, user: u });
+      const d = await diagrams.duplicate(req.params.id, { name, user: u, version: req.body?.version });
+      if (d?.error) return fail(reply, 404, d.error);
       return d ? reply.code(201).send(d) : fail(reply, 404, 'Diagramme introuvable.');
     } catch (e) { return gitFail(reply, e); }
   });

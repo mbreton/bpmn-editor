@@ -373,7 +373,7 @@ export function createApplier(modeler) {
     modeling.moveShape(lbl, { x: ox - lbl.x, y: oy - lbl.y });
     return freeLabel(lbl);
   }
-  const LAYOUT_OPS = new Set(['append', 'insert', 'attach', 'connect', 'delete', 'move', 'reroute', 'replace', 'add', 'space', 'resize']);
+  const LAYOUT_OPS = new Set(['append', 'insert', 'attach', 'connect', 'delete', 'move', 'reroute', 'replace', 'add', 'space', 'resize', 'pool']);
   /** Libellé resté loin de ce qu'il nomme (plus de 30 px de son élément ou de son flux). */
   function labelFar(lbl) {
     const o = lbl.labelTarget, b = boxOf(lbl);
@@ -941,6 +941,41 @@ export function createApplier(modeler) {
     return n;
   }
 
+  // ---------- pools et flux de messages (échanges avec un acteur externe, ex. l'assureur) ----------
+  const ancestors = e => { const out = []; for (let p = e?.parent; p; p = p.parent) out.push(p); return out; };
+  const participantOf = e => is(e, 'bpmn:Participant') ? e : ancestors(e).find(p => is(p, 'bpmn:Participant')) || null;
+  /**
+   * Flux de message entre un élément et un pool : trait vertical, sans traverser de boîte ni de
+   * libellé si possible, à 14 px au moins des autres messages du même élément (aller et retour côte à côte).
+   */
+  function layoutMessageFlow(c) {
+    const s = c.source, t = c.target;
+    const pool = is(t, 'bpmn:Participant') && t !== participantOf(s) ? t : is(s, 'bpmn:Participant') && s !== participantOf(t) ? s : null;
+    if (!pool || pool.waypoints) return;
+    const el = pool === t ? s : t;
+    const below = pool.y > el.y + el.height / 2;
+    const y1 = below ? el.y + el.height : el.y, y2 = below ? pool.y : pool.y + pool.height;
+    const skip = new Set([el, pool, ...ancestors(el), ...(el.attachers || []), el.host].filter(Boolean));
+    const taken = [...(el.incoming || []), ...(el.outgoing || [])].filter(o => o !== c && is(o, 'bpmn:MessageFlow') && o.waypoints).map(o => o.waypoints[0].x === o.waypoints.at(-1).x ? o.waypoints[0].x : null).filter(x => x !== null);
+    const cx = el.x + el.width / 2;
+    const xs = [];
+    for (let d = 0; d <= el.width / 2 - 8; d += 6) { xs.push(cx - d); if (d) xs.push(cx + d); }
+    // les conteneurs (pool, sous-processus déplié) ne bloquent pas : on en traverse forcément le bord
+    const blockedBy = x => registry.getAll().filter(e => !skip.has(e) && e.parent && !e.waypoints && Number.isFinite(e.width) && e.width > 0
+      && !isContainerShape(e) && !is(e, 'bpmn:Process') && !is(e, 'bpmn:Collaboration')
+      && segmentHits({ x, y: y1 }, { x, y: y2 }, inflate(boxOf(e), e.type === 'label' ? 1 : 4))).length;
+    let best = null;
+    for (const x of xs) {
+      if (taken.some(tx => Math.abs(tx - x) < 14)) continue;
+      const cost = blockedBy(x) * 100 + Math.abs(x - cx) / 10;
+      if (!best || cost < best.cost) best = { x, cost };
+      if (cost < 1) break;
+    }
+    const x = Math.round(best ? best.x : cx);
+    const pts = s === el ? [{ x, y: y1 }, { x, y: y2 }] : [{ x, y: y2 }, { x, y: y1 }];
+    modeling.updateWaypoints(c, pts);
+  }
+
   /** Après un déplacement : redresser les flux reliés qui peuvent l'être, replacer libellés et commentaires. */
   function afterMove(el) {
     if (is(el, 'bpmn:TextAnnotation')) { placeNote(el); return; }
@@ -977,6 +1012,27 @@ export function createApplier(modeler) {
       if (!els.length) throw new OpError('aucun élément à colorer');
       const colors = preset ? { fill: preset.fill, stroke: preset.stroke } : { fill: op.fill || undefined, stroke: op.stroke || undefined };
       modeling.setColor(els, colors);
+    },
+
+    /**
+     * Pool d'un acteur externe (par défaut en « boîte noire » : un bandeau sans détail interne), placé
+     * sous (ou au-dessus) des pools existants, de même largeur. On le relie ensuite aux activités par des
+     * connect : ce sont des flux de message (pointillés), tracés à la verticale.
+     */
+    pool(op) {
+      const root = canvas.getRootElement();
+      const pools = registry.filter(e => is(e, 'bpmn:Participant') && e.parent === root);
+      if (!pools.length) throw new OpError('le diagramme n\'a pas encore de pool : ajoutez d\'abord celui du processus principal');
+      const x = Math.min(...pools.map(p => p.x)), w = Math.max(...pools.map(p => p.x + p.width)) - x;
+      const h = op.blackbox === false ? 200 : 60;
+      const above = op.side === 'above';
+      const y = above ? Math.min(...pools.map(p => p.y)) - 60 - h : Math.max(...pools.map(p => p.y + p.height)) + 60;
+      const shape = elementFactory.createParticipantShape({ isExpanded: op.blackbox === false });
+      if (op.ref && ID_RE.test(op.ref) && !registry.get(op.ref)) shape.businessObject.id = op.ref, shape.id = op.ref;
+      const created = modeling.createShape(shape, { x: x + w / 2, y: y + h / 2 }, root);
+      modeling.resizeShape(created, { x, y, width: w, height: h });
+      if (op.ref) refs.set(op.ref, created.id);
+      if (op.name) modeling.updateLabel(created, String(op.name).trim());
     },
 
     /** Redimensionne un élément (commentaire, sous-processus déplié, pool) ; le coin haut gauche reste en place. */
@@ -1057,6 +1113,7 @@ export function createApplier(modeler) {
       if (op.ref) refs.set(op.ref, c.id);
       if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
       else if (op.route) routeShape(c, op.route);
+      else if (is(c, 'bpmn:MessageFlow')) layoutMessageFlow(c);
       else { loopBelowIfBackward(c); improveRoute(c); untanglePair(c); }
       fixGatewayExits(a);
       if (op.name) modeling.updateLabel(c, op.name);
@@ -1113,6 +1170,7 @@ export function createApplier(modeler) {
       for (const g of gateways()) exits += fixGatewayExits(g);
       flows = touched.size;
       settled = new Set();
+      for (const m of registry.filter(e => is(e, 'bpmn:MessageFlow') && e.waypoints)) layoutMessageFlow(m);
       const labels = normalizeLabels(registry.filter(e => e.type === 'label'));
       for (const n of allNotes) if (placeNote(n)) notesFixed++;
       const pools = trimPools();

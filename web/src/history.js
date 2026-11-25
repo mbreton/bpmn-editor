@@ -1,6 +1,6 @@
 // Historique Git du diagramme : consultation d'une version sur le canevas, restauration.
 import { api } from './api.js';
-import { h, esc, fmtDate, toast } from './dom.js';
+import { h, esc, fmtDate, toast, dialog } from './dom.js';
 
 export function createHistory(ctx, host) {
   let viewing = null;   // sha affiché
@@ -47,9 +47,19 @@ export function createHistory(ctx, host) {
       <div><b>Version ${v.version}</b> <span class="muted small">${esc(fmtDate(v.createdAt))} · ${esc(v.author)}${v.message ? ' · ' + esc(v.message) : ''}</span></div>
       <div class="row">
         <button class="btn" data-a="close">Revenir au brouillon</button>
+        <button class="btn" data-a="fork" title="Créer un nouveau diagramme à partir de cette version, sans toucher à celui-ci">Copier dans un nouveau diagramme</button>
         <button class="btn primary" data-a="restore" ${ctx.editing ? '' : 'disabled title="Passez en mode édition pour restaurer"'}>Remettre cette version</button>
       </div></div>`);
     banner.querySelector('[data-a=close]').addEventListener('click', close);
+    banner.querySelector('[data-a=fork]').addEventListener('click', async () => {
+      const name = await dialog({ title: `Copier la version ${v.version}`, body: 'Un nouveau diagramme est créé à partir de cette version, avec son propre historique. Celui-ci ne change pas.', input: { value: `${ctx.name} v${v.version} (copie)` }, buttons: [{ label: 'Annuler', value: null }, { label: 'Créer la copie', value: '$input', primary: true }] });
+      if (!name?.trim()) return;
+      try {
+        const c = await api.duplicate(ctx.id, name.trim(), v.version);
+        toast(`Copie créée : ${c.name}`);
+        location.assign(`/d/${c.id}`);
+      } catch (e) { toast(e.message, 'error'); }
+    });
     banner.querySelector('[data-a=restore]').addEventListener('click', async () => {
       try {
         const r = await api.restore(ctx.id, sha, ctx.holder);

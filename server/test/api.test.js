@@ -151,7 +151,14 @@ test('dupliquer : la copie reprend le brouillon courant, nom rendu unique', asyn
   assert.equal((await call('POST', '/api/diagrams/inconnu/duplicate', { cookie: aliceCookie, body: {} })).statusCode, 404);
   assert.equal((await call('POST', `/api/diagrams/${d.id}/duplicate`, { body: {} })).statusCode, 401);
   await call('POST', `/api/diagrams/${d.id}/unlock`, { cookie: aliceCookie, body: { holder: 'D' } });
-  for (const x of [d, c1.json(), c2, c3]) assert.equal((await call('DELETE', `/api/diagrams/${x.id}`, { cookie: adminCookie })).statusCode, 200);
+  // copie d'une ancienne version (fork) : la version 1 n'a pas le brouillon
+  const c4 = await call('POST', `/api/diagrams/${d.id}/duplicate`, { cookie: aliceCookie, body: { version: 1 } });
+  assert.equal(c4.statusCode, 201);
+  assert.equal(c4.json().name, 'Source copie v1 (copie)');
+  const fork = (await call('GET', `/api/diagrams/${c4.json().id}`, { cookie: aliceCookie })).json();
+  assert.doesNotMatch(fork.xml, /Brouillon en cours/, 'la version 1, pas le brouillon');
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/duplicate`, { cookie: aliceCookie, body: { version: 99 } })).statusCode, 404);
+  for (const x of [d, c1.json(), c2, c3, c4.json()]) assert.equal((await call('DELETE', `/api/diagrams/${x.id}`, { cookie: adminCookie })).statusCode, 200);
 });
 
 test('renommage avec git mv : l\'historique suit', async () => {

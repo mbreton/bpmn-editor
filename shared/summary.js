@@ -54,7 +54,10 @@ export function summarize(definitions) {
   };
   for (const r of definitions.rootElements || []) {
     if (is(r, 'bpmn:Process')) { lines.push(`Processus [${r.id}]${r.name ? ` « ${r.name} »` : ''}`); walk(r, 1); }
-    if (is(r, 'bpmn:Collaboration')) for (const p of r.participants || []) lines.push(`Pool [${p.id}] « ${p.name || ''} » → processus ${p.processRef?.id || '?'}`);
+    if (is(r, 'bpmn:Collaboration')) {
+      for (const p of r.participants || []) lines.push(`Pool [${p.id}] « ${p.name || ''} » → ${p.processRef ? `processus ${p.processRef.id}` : 'boîte noire (acteur externe)'}`);
+      for (const m of r.messageFlows || []) lines.push(`  message [${m.id}]${m.name ? ` « ${m.name} »` : ''} : ${m.sourceRef?.id} → ${m.targetRef?.id}`);
+    }
   }
   return { text: lines.join('\n') };
 }

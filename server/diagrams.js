@@ -93,14 +93,23 @@ export function createDiagrams({ db, git }) {
     },
 
     /** Copie un diagramme (état de travail courant, brouillon compris) sous un nouveau nom libre. */
-    async duplicate(id, { name, user }) {
+    async duplicate(id, { name, user, version }) {
       const src = await this.get(id);
       if (!src) return null;
+      // une ancienne version (numéro ou sha) plutôt que l'état courant : « fork » de cette version
+      let xml = src.xml, from = '';
+      if (version !== undefined && version !== null && version !== '') {
+        const history = await git.history(src.path);
+        const v = history.find(x => String(x.version) === String(version) || (String(version).length >= 7 && x.sha.startsWith(String(version))));
+        if (!v) return { error: `Version « ${version} » introuvable.` };
+        xml = await git.show(v.sha, src.path);
+        from = ` (version ${v.version})`;
+      }
       const taken = new Set(db.listDiagrams().map(d => d.name));
-      let n = (name || '').trim() || `${src.name} (copie)`;
+      let n = (name || '').trim() || `${src.name}${from ? ` v${from.match(/\d+/)[0]}` : ''} (copie)`;
       if (taken.has(n)) { const base = n.replace(/ \(copie(?: \d+)?\)$/, ''); for (let k = 2; taken.has(n); k++) n = `${base} (copie ${k})`; }
       const path = freePath(n);
-      const sha = await git.write(path, src.xml, { author: authorOf(user), message: `Copie de ${src.name} : ${n}` });
+      const sha = await git.write(path, xml, { author: authorOf(user), message: `Copie de ${src.name}${from} : ${n}` });
       const d = db.insertDiagram({ name: n, path, updatedBy: user.name });
       return { ...d, rev: sha, version: 1 };
     },

@@ -290,12 +290,13 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, l
 
     server.registerTool('duplicate_diagram', {
       title: 'Dupliquer un diagramme',
-      description: 'Copie un diagramme (son état de travail courant, brouillon compris) sous un nouveau nom, avec son propre historique ; renvoie l\'adresse de la copie. À faire seulement quand l\'utilisateur le demande.',
-      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme à copier'), name: z.string().max(200).optional().describe('Nom de la copie (par défaut « <nom> (copie) »)') }
-    }, async ({ diagram, name }) => {
+      description: 'Copie un diagramme sous un nouveau nom, avec son propre historique ; renvoie l\'adresse de la copie. Par défaut son état de travail courant (brouillon compris) ; avec version (numéro, voir history), une ancienne version enregistrée, pour la retravailler à part sans la restaurer. À faire seulement quand l\'utilisateur le demande.',
+      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme à copier'), name: z.string().max(200).optional().describe('Nom de la copie (par défaut « <nom> (copie) »)'), version: z.union([z.number().int().positive(), z.string()]).optional().describe('Numéro de version à copier (par défaut : l\'état courant)') }
+    }, async ({ diagram, name, version }) => {
       const d = find(diagram);
       if (!d) return text(`Diagramme « ${diagram} » introuvable.`);
-      const c = await diagrams.duplicate(d.id, { name, user });
+      const c = await diagrams.duplicate(d.id, { name, user, version });
+      if (c?.error) return text(c.error);
       return text(`Copie « ${c.name} » créée [id ${c.id}] : ${url(c.id)}`);
     });
 
