@@ -3,7 +3,7 @@
 // (placement automatique, insertion sur un flux), pas par Claude.
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { createFocus } from './focus.js';
-import { labelOverflow, overflowText, overflowFix } from '../../shared/labelfit.js';
+import { labelOverflow, overflowText, overflowFix, lineCount } from '../../shared/labelfit.js';
 
 const EVENT_DEFS = {
   timer: 'bpmn:TimerEventDefinition', message: 'bpmn:MessageEventDefinition', error: 'bpmn:ErrorEventDefinition',
@@ -69,8 +69,13 @@ export function createApplier(modeler) {
     return hits;
   }
 
-  // ---------- coût d'un tracé : traverser un élément >> chevaucher un autre flux > le croiser ----------
-  const segsOf = c => c.waypoints.slice(1).map((q, i) => [c.waypoints[i], q]);
+  // ---------- coût d'un tracé : traverser un élément >> même côté de passerelle > chevaucher un flux > le croiser > virages > longueur ----------
+  // Les tracés sont évalués sans être appliqués : pending remplace provisoirement le tracé d'autres flux.
+  const pending = new Map();
+  const wpOf = e => pending.get(e.id) || e.waypoints;
+  const as = (c, pts) => ({ id: c.id, type: c.type, businessObject: c.businessObject, source: c.source, target: c.target, parent: c.parent, waypoints: pts });
+  const segsOf = c => { const w = c.waypoints; return w.slice(1).map((q, i) => [w[i], q]); };
+  const segsOfPts = w => w.slice(1).map((q, i) => [w[i], q]);
   const horiz = ([p, q]) => Math.abs(p.y - q.y) < 1, vert = ([p, q]) => Math.abs(p.x - q.x) < 1;
   /** Longueur commune de deux segments superposés (même ligne), 0 sinon. */
   function overlapLen(a, b) {
@@ -84,68 +89,147 @@ export function createApplier(modeler) {
     }
     return 0;
   }
-  /** Croisement franc (un horizontal et un vertical qui se coupent hors de leurs extrémités). */
-  function crosses(a, b) {
-    const [h, v] = horiz(a) && vert(b) ? [a, b] : horiz(b) && vert(a) ? [b, a] : [null, null];
-    if (!h) return false;
-    const x = v[0].x, y = h[0].y;
-    const inH = x > Math.min(h[0].x, h[1].x) + 2 && x < Math.max(h[0].x, h[1].x) - 2;
-    const inV = y > Math.min(v[0].y, v[1].y) + 2 && y < Math.max(v[0].y, v[1].y) - 2;
-    return inH && inV;
+  /** Deux segments quelconques qui se coupent franchement (hors de leurs extrémités). */
+  function cutSeg(p1, p2, p3, p4) {
+    const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+    if (Math.abs(d) < 1e-9) return false;
+    const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+    const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+    return t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98;
   }
-  /** Superpositions et croisements avec les autres flux (les flux qui partagent une extrémité peuvent se rejoindre près d'elle). */
+  const crosses = (a, b) => cutSeg(a[0], a[1], b[0], b[1]);
+  const otherFlows = c => registry.filter(e => e.waypoints && e.id !== c.id && !is(e, 'bpmn:Association') && e.waypoints.length > 1);
+  /** Superpositions et croisements avec les autres flux, et les flux concernés (with). */
   function flowConflicts(c) {
     let overlap = 0, cross = 0;
+    const withIds = new Set();
     const mine = segsOf(c);
-    for (const o of registry.filter(e => e.waypoints && e !== c && !is(e, 'bpmn:Association') && e.waypoints.length > 1)) {
+    for (const o of otherFlows(c)) {
       const shared = [c.source, c.target].filter(x => x === o.source || x === o.target);
-      // longueur totale superposée (tous segments confondus), moins une tolérance de convergence
-      // de 30 px par élément commun
-      let total = 0;
-      for (const a of mine) for (const b of segsOf(o)) {
+      // longueur totale superposée, moins une tolérance de convergence de 30 px vers un élément commun
+      // (aucune pour un aller-retour entre les deux mêmes éléments)
+      let total = 0, n = 0;
+      const theirs = segsOfPts(wpOf(o));
+      for (const a of mine) for (const b of theirs) {
         const len = overlapLen(a, b);
         if (len) total += len;
-        else if (crosses(a, b)) cross++;
+        else if (!shared.length && crosses(a, b)) n++;
       }
-      if (total - (shared.length === 1 ? 30 : 0) > 8) overlap++;   // aller-retour entre les deux mêmes éléments : aucune tolérance
+      if (total - (shared.length === 1 ? 30 : 0) > 8) { overlap++; withIds.add(o.id); }
+      if (n) { cross += n; withIds.add(o.id); }
     }
-    return { overlap, cross };
+    return { overlap, cross, with: withIds };
   }
-  function routeCost(c) {
-    const len = segsOf(c).reduce((n, [p, q]) => n + Math.abs(p.x - q.x) + Math.abs(p.y - q.y), 0);
-    const { overlap, cross } = flowConflicts(c);
-    const sideClash = is(c.source, 'bpmn:Gateway') && (c.source.outgoing || []).some(o => o !== c && o.waypoints?.length && exitSide(o) === exitSide(c));
-    return crossedBy(c).length * 1000 + (sideClash ? 600 : 0) + overlap * 300 + cross * 40 + (c.waypoints.length - 2) * 5 + len / 50;
+  /** Autre sortie de la même passerelle qui part du même côté. */
+  function sideClashWith(c) {
+    if (!is(c.source, 'bpmn:Gateway')) return null;
+    const side = exitSide(c, c.waypoints);
+    return (c.source.outgoing || []).find(o => o.id !== c.id && wpOf(o)?.length && exitSide(o, wpOf(o)) === side) || null;
   }
+  const lengthOf = pts => segsOfPts(pts).reduce((n, [p, q]) => n + Math.abs(p.x - q.x) + Math.abs(p.y - q.y), 0);
+  function routeInfo(c) {
+    const { overlap, cross, with: withIds } = flowConflicts(c);
+    const clash = sideClashWith(c);
+    if (clash) withIds.add(clash.id);
+    const hits = crossedBy(c).length;
+    const bends = c.waypoints.length - 2;
+    const cost = hits * 1000 + (clash ? 600 : 0) + overlap * 300 + cross * 80 + bends * 25 + lengthOf(c.waypoints) / 20;
+    return { cost, clean: !hits && !clash && !overlap && !cross, with: withIds, bends };
+  }
+  const routeCost = c => routeInfo(c).cost;
+
+  /** Tracés candidats (points de passage) pour un flux. */
+  function candidates(c) {
+    const vias = [];
+    const s = c.source, t = c.target;
+    const sc = { x: s.x + s.width / 2, y: s.y + s.height / 2 }, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+    // tout droit, quand les deux éléments se font face (le plus direct)
+    const yLo = Math.max(s.y, t.y) + 4, yHi = Math.min(s.y + s.height, t.y + t.height) - 4;
+    if (yLo <= yHi) { const y = Math.min(Math.max(sc.y, yLo), yHi); const y2 = Math.min(Math.max(tc.y, yLo), yHi); for (const yy of new Set([y, y2])) vias.push([{ x: (sc.x + tc.x) / 2, y: yy }]); }
+    const xLo = Math.max(s.x, t.x) + 4, xHi = Math.min(s.x + s.width, t.x + t.width) - 4;
+    if (xLo <= xHi) { const x = Math.min(Math.max(sc.x, xLo), xHi); const x2 = Math.min(Math.max(tc.x, xLo), xHi); for (const xx of new Set([x, x2])) vias.push([{ x: xx, y: (sc.y + tc.y) / 2 }]); }
+    const backward = t.x + t.width < s.x;
+    if (backward) for (const side of ['below', 'above']) for (const extra of [0, 15, 30, 45, 60]) { const v = loopVia(c, side, extra); if (v) vias.push(v); }
+    vias.push([{ x: tc.x, y: sc.y }], [{ x: sc.x, y: tc.y }], [{ x: (sc.x + tc.x) / 2, y: sc.y }, { x: (sc.x + tc.x) / 2, y: tc.y }], [{ x: sc.x, y: (sc.y + tc.y) / 2 }, { x: tc.x, y: (sc.y + tc.y) / 2 }]);
+    for (const sd of ['right', 'bottom', 'top', 'left']) vias.push(viaFromSide(c, sd));
+    // contournements décalés (couloirs libres au-dessus / au-dessous)
+    const dir = Math.sign(tc.x - sc.x || 1);
+    for (const dy of [-60, -40, 40, 60]) vias.push([{ x: sc.x + dir * (s.width / 2 + 20), y: sc.y }, { x: sc.x + dir * (s.width / 2 + 20), y: tc.y + dy }, { x: tc.x - dir * (t.width / 2 + 20), y: tc.y + dy }, { x: tc.x - dir * (t.width / 2 + 20), y: tc.y }]);
+    const out = [], seen = new Set();
+    for (const v of vias) {
+      let pts; try { pts = computeVia(c, v); } catch { continue; }
+      const k = pts.map(p => `${Math.round(p.x)},${Math.round(p.y)}`).join(' ');
+      if (!seen.has(k)) { seen.add(k); out.push(pts); }
+    }
+    return out;
+  }
+  const copyPts = w => w.map(p => ({ x: p.x, y: p.y }));
+  const straight = c => (wpOf(c) || []).length === 2;
 
   /**
    * Cherche le meilleur tracé pour un flux : ne traverse aucun élément, ne se superpose à aucun autre
-   * flux, en croise le moins possible, reste court. Garde l'actuel s'il n'y a pas mieux.
+   * flux, en croise le moins possible, avec le moins de virages. Un flux déjà droit et sans conflit
+   * n'est pas touché ; un flux qui peut aller tout droit est redressé.
    */
   function improveRoute(c, { force = false } = {}) {
     if (!c.waypoints) return false;
-    const keep = c.waypoints.map(p => ({ x: p.x, y: p.y }));
-    const current = force ? Infinity : routeCost(c);
-    if (!force && current < 1) return false;
-    const vias = [];
-    const backward = c.target.x + c.target.width < c.source.x;
-    if (backward) for (const side of ['below', 'above']) for (const extra of [0, 15, 30, 45, 60]) { const v = loopVia(c, side, extra); if (v) vias.push(v); }
-    const sc = { x: c.source.x + c.source.width / 2, y: c.source.y + c.source.height / 2 }, tc = { x: c.target.x + c.target.width / 2, y: c.target.y + c.target.height / 2 };
-    vias.push([{ x: tc.x, y: sc.y }], [{ x: sc.x, y: tc.y }], [{ x: (sc.x + tc.x) / 2, y: sc.y }, { x: (sc.x + tc.x) / 2, y: tc.y }], [{ x: sc.x, y: (sc.y + tc.y) / 2 }, { x: tc.x, y: (sc.y + tc.y) / 2 }]);
-    for (const sd of ['right', 'bottom', 'top', 'left']) vias.push(viaFromSide(c, sd));
-    // contournements décalés (couloirs libres au-dessus / au-dessous de l'élément traversé)
-    for (const dy of [-60, -40, 40, 60]) vias.push([{ x: sc.x + Math.sign(tc.x - sc.x || 1) * (c.source.width / 2 + 20), y: sc.y }, { x: sc.x + Math.sign(tc.x - sc.x || 1) * (c.source.width / 2 + 20), y: tc.y + dy }, { x: tc.x - Math.sign(tc.x - sc.x || 1) * (c.target.width / 2 + 20), y: tc.y + dy }, { x: tc.x - Math.sign(tc.x - sc.x || 1) * (c.target.width / 2 + 20), y: tc.y }]);
-    let best = { cost: current, pts: keep };
-    for (const v of vias) {
-      try { routeVia(c, v); } catch { continue; }
-      const cost = routeCost(c);
-      if (cost < best.cost - 0.5) best = { cost, pts: c.waypoints.map(p => ({ x: p.x, y: p.y })) };
+    const keep = copyPts(c.waypoints);
+    const cur = routeInfo(c);
+    if (!force && cur.clean && cur.bends === 0) return false;
+    let best = { cost: force ? Infinity : cur.cost, pts: keep };
+    for (const pts of candidates(c)) {
+      const cost = routeCost(as(c, pts));
+      if (cost < best.cost - 3) best = { cost, pts };
     }
-    if (best.pts === keep) { if (!sameWaypoints(keep, c.waypoints)) modeling.updateWaypoints(c, keep); return false; }
-    if (!sameWaypoints(best.pts, c.waypoints)) modeling.updateWaypoints(c, best.pts);
-    return !sameWaypoints(best.pts, keep);
+    if (best.pts === keep || sameWaypoints(best.pts, keep)) return false;
+    modeling.updateWaypoints(c, best.pts);
+    return true;
   }
   const untangle = c => improveRoute(c);
+
+  /**
+   * Quand un flux en croise un autre, se superpose à lui ou lui prend son côté de passerelle, la
+   * meilleure solution est parfois de retracer l'AUTRE flux : on évalue les deux ensemble. Un flux
+   * déjà droit n'est jamais déplacé pour ça.
+   */
+  function untanglePair(c) {
+    if (!c.waypoints) return false;
+    const info = routeInfo(c);
+    // partenaires : ceux qui gênent le tracé actuel, ou un meilleur tracé (plus direct) de c
+    const partners = new Set(info.with);
+    const mine = candidates(c);
+    for (const pts of mine) {
+      if (pts.length - 2 >= info.bends && info.clean) continue;
+      const ri = routeInfo(as(c, pts));
+      if (!crossedBy(as(c, pts)).length) for (const id of ri.with) partners.add(id);
+    }
+    let changed = false;
+    for (const id of [...partners].slice(0, 4)) {
+      const o = registry.get(id);
+      if (!o?.waypoints || o === c) continue;
+      const cKeep = copyPts(c.waypoints), oKeep = copyPts(o.waypoints);
+      const total = (pc, po) => {
+        pending.set(o.id, po); const a = routeCost(as(c, pc)); pending.delete(o.id);
+        pending.set(c.id, pc); const b = routeCost(as(o, po)); pending.delete(c.id);
+        return a + b;
+      };
+      const base = total(cKeep, oKeep);
+      // les meilleurs tracés de c (l'autre flux restant en place), puis toutes les variantes de l'autre
+      const cOpts = [cKeep, ...mine.map(pts => [routeCost(as(c, pts)), pts]).sort((a, b) => a[0] - b[0]).slice(0, 8).map(x => x[1])];
+      const oOpts = straight(o) ? [oKeep] : [oKeep, ...candidates(o)];
+      let best = { cost: base - 3, pc: null, po: null };
+      for (const pc of cOpts) for (const po of oOpts) {
+        const t = total(pc, po);
+        if (t < best.cost) best = { cost: t, pc, po };
+      }
+      if (best.pc) {
+        if (!sameWaypoints(best.pc, c.waypoints)) modeling.updateWaypoints(c, best.pc);
+        if (!sameWaypoints(best.po, o.waypoints)) modeling.updateWaypoints(o, best.po);
+        changed = true;
+      }
+    }
+    return changed;
+  }
 
 
   // ---------- libellés qui se chevauchent ----------
@@ -153,12 +237,12 @@ export function createApplier(modeler) {
     const r = inflate(boxOf(lbl), 1);
     const owner = lbl.labelTarget;
     const shapesHit = registry.getAll().filter(e => e !== lbl && e !== owner && e.parent && Number.isFinite(e.width) && !e.waypoints
-      && !isContainerShape(e) && !is(e, 'bpmn:Collaboration') && !is(e, 'bpmn:Process') && e !== owner?.host
+      && !isContainerShape(e) && !is(e, 'bpmn:Collaboration') && !is(e, 'bpmn:Process')
       && hit(r, boxOf(e)));
     // un trait qui barre le libellé (sauf le flux qu'il nomme)
     const core = inflate(boxOf(lbl), -1);
-    const linesHit = registry.filter(e => e.waypoints && e !== owner && !is(e, 'bpmn:Association')
-      && e.waypoints.some((p, i) => i > 0 && segmentHits(e.waypoints[i - 1], p, core)));
+    const linesHit = registry.filter(e => e.waypoints && !is(e, 'bpmn:Association')
+      && e.waypoints.some((p, i) => i > 0 && segmentHits(e.waypoints[i - 1], p, e === owner ? inflate(core, 1) : core)));
     return [...shapesHit, ...linesHit];
   }
   /** Déplace un libellé externe qui recouvre un élément ou un autre libellé vers une place libre proche. */
@@ -193,13 +277,189 @@ export function createApplier(modeler) {
     return false;
   }
 
+  // ---------- libellés à distance fixe ----------
+  const LABEL_GAP = 5;
+  /**
+   * Places normalisées d'un libellé, dans l'ordre de préférence, toutes à la même distance :
+   * passerelle juste au-dessus (puis en dessous, à droite, à gauche) ; événement juste en dessous
+   * (puis au-dessus…) ; flux collé à son premier segment, côté départ (puis à son deuxième segment).
+   */
+  function labelSpots(lbl) {
+    const o = lbl.labelTarget, w = lbl.width, h = lbl.height;
+    if (o.waypoints) {
+      const pts = o.waypoints, spots = [];
+      for (let i = 1; i < pts.length && i <= 2; i++) {
+        const p = pts[i - 1], q = pts[i];
+        if (Math.abs(p.y - q.y) < 1) {
+          const len = Math.abs(q.x - p.x), dir = Math.sign(q.x - p.x) || 1;
+          const x = len < w + 12 ? (p.x + q.x) / 2 - w / 2 : dir > 0 ? p.x + 6 : p.x - 6 - w;
+          spots.push({ x, y: p.y - 4 - h }, { x, y: p.y + 4 });
+        } else if (Math.abs(p.x - q.x) < 1) {
+          const len = Math.abs(q.y - p.y), dir = Math.sign(q.y - p.y) || 1;
+          const y = len < h + 12 ? (p.y + q.y) / 2 - h / 2 : dir > 0 ? p.y + 6 : p.y - 6 - h;
+          spots.push({ x: p.x + 5, y }, { x: p.x - 5 - w, y });
+        } else spots.push({ x: (p.x + q.x) / 2 + 5, y: (p.y + q.y) / 2 - h - 4 });
+      }
+      return spots;
+    }
+    const cx = o.x + o.width / 2, cy = o.y + o.height / 2, g = LABEL_GAP;
+    const above = { x: cx - w / 2, y: o.y - g - h }, below = { x: cx - w / 2, y: o.y + o.height + g };
+    const right = { x: o.x + o.width + g, y: cy - h / 2 }, left = { x: o.x - g - w, y: cy - h / 2 };
+    const corners = [{ x: o.x + o.width + g, y: o.y + o.height + g }, { x: o.x - g - w, y: o.y + o.height + g }, { x: o.x + o.width + g, y: o.y - g - h }, { x: o.x - g - w, y: o.y - g - h }];
+    if (o.host) return [below, corners[0], corners[1], right, left];   // événement de bordure : jamais dans sa boîte
+    return is(o, 'bpmn:Gateway') ? [above, below, right, left, ...corners] : [below, above, right, left, ...corners];
+  }
+  /** Place un libellé à la première place normalisée libre (recherche plus large en dernier recours). */
+  function normalizeLabel(lbl) {
+    if (!lbl?.width || !lbl.labelTarget) return false;
+    const ox = lbl.x, oy = lbl.y;
+    for (const p of labelSpots(lbl)) {
+      const dx = Math.round(p.x - lbl.x), dy = Math.round(p.y - lbl.y);
+      if (dx || dy) modeling.moveShape(lbl, { x: dx, y: dy });
+      if (!labelClashes(lbl).length) return Math.abs(lbl.x - ox) > 1 || Math.abs(lbl.y - oy) > 1;
+    }
+    modeling.moveShape(lbl, { x: ox - lbl.x, y: oy - lbl.y });
+    return freeLabel(lbl);
+  }
+  /** Tous les libellés : ceux des éléments d'abord, puis ceux des flux ; deux passes. */
+  function normalizeLabels(list) {
+    const moved = new Set();
+    const sorted = list.filter(l => l?.width && l.labelTarget).sort((a, b) => (a.labelTarget.waypoints ? 1 : 0) - (b.labelTarget.waypoints ? 1 : 0));
+    for (const l of sorted) if (normalizeLabel(l)) moved.add(l);
+    for (const l of sorted) if (labelClashes(l).length && normalizeLabel(l)) moved.add(l);
+    return moved.size;
+  }
+
+  // ---------- commentaires ----------
+  /** Retire les retours à la ligne et espaces en trop autour du texte ; hauteur ajustée au texte. */
+  function fitAnnotation(el) {
+    if (!is(el, 'bpmn:TextAnnotation')) return false;
+    const bo = getBusinessObject(el);
+    const raw = String(bo.text || '');
+    const text = raw.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    let changed = false;
+    if (text !== raw) { modeling.updateProperties(el, { text }); changed = true; }
+    const need = Math.max(30, Math.ceil(lineCount(text, el.width - 10) * 14.4 + 12));
+    if (Math.abs(el.height - need) > 3) { modeling.resizeShape(el, { x: el.x, y: el.y, width: el.width, height: need }); changed = true; }
+    return changed;
+  }
+  const noteLinks = note => [...(note.incoming || []), ...(note.outgoing || [])].filter(a => is(a, 'bpmn:Association'));
+  const noteTarget = note => { const a = noteLinks(note)[0]; return a ? (a.source === note ? a.target : a.source) : null; };
+  const boxOfAny = e => e.waypoints ? (() => { let b = null; for (let i = 1; i < e.waypoints.length; i++) { const p = e.waypoints[i - 1], q = e.waypoints[i]; const len = Math.abs(q.x - p.x) + Math.abs(q.y - p.y); if (!b || len > b.len) b = { len, x: (p.x + q.x) / 2 - 1, y: (p.y + q.y) / 2 - 1 }; } return { x: b.x, y: b.y, width: 2, height: 2 }; })() : boxOf(e);
+  /** Problèmes d'un commentaire à une place donnée : boîte qui chevauche, pointillé qui traverse. */
+  function noteProblems(note, box, target) {
+    const tb = boxOfAny(target);
+    const skip = new Set([note, target, target.host, ...(target.attachers || [])].filter(Boolean));
+    const area = areaOf(note);
+    if (area && !(box.x >= area.x && box.y >= area.y && box.x + box.width <= area.x + area.width && box.y + box.height <= area.y + area.height)) return 1;
+    let n = 0;
+    const a = { x: box.x + box.width / 2, y: box.y + box.height / 2 }, b = { x: tb.x + tb.width / 2, y: tb.y + tb.height / 2 };
+    for (const e of registry.getAll()) {
+      if (skip.has(e) || !e.parent) continue;
+      if (e.type === 'label') { if (e.width && e.labelTarget !== note && hit(inflate(box, 4), boxOf(e))) n++; continue; }
+      if (e.waypoints) {
+        if (noteLinks(note).includes(e)) continue;
+        const segs = segsOfPts(e.waypoints);
+        if (segs.some(([p, q]) => segmentHits(p, q, inflate(box, 6)))) n++;
+        else if (!is(e, 'bpmn:Association') && segs.some(([p, q]) => cutSeg(a, b, p, q))) n++;
+        continue;
+      }
+      if (isContainerShape(e) || is(e, 'bpmn:Process') || is(e, 'bpmn:Collaboration')) continue;
+      if (hit(inflate(box, 8), boxOf(e))) n++;
+      else if (segmentHits(a, b, inflate(boxOf(e), -2))) n++;
+    }
+    return n;
+  }
+  /** Commentaire qui chevauche ou dont le pointillé traverse : place libre proche de son élément. */
+  function placeNote(note) {
+    const target = noteTarget(note);
+    if (!target) return false;
+    if (!noteProblems(note, boxOf(note), target)) return false;
+    const tb = boxOfAny(target), w = note.width, h = note.height;
+    const cx = tb.x + tb.width / 2, cy = tb.y + tb.height / 2;
+    const spots = [];
+    for (const d of [25, 40, 60, 90]) for (const k of [0, 40, -40, 80, -80]) {
+      spots.push({ x: cx - w / 2 + k, y: tb.y - d - h }, { x: cx - w / 2 + k, y: tb.y + tb.height + d },
+        { x: tb.x + tb.width + d, y: cy - h / 2 + k }, { x: tb.x - d - w, y: cy - h / 2 + k });
+    }
+    const dist = p => Math.hypot(p.x + w / 2 - cx, p.y + h / 2 - cy);
+    spots.sort((a, b) => dist(a) - dist(b));
+    for (const p of spots) {
+      const box = { x: p.x, y: p.y, width: w, height: h };
+      if (!noteProblems(note, box, target)) { modeling.moveShape(note, { x: Math.round(p.x - note.x), y: Math.round(p.y - note.y) }); return true; }
+    }
+    return false;
+  }
+  const noteCrossings = () => registry.filter(e => is(e, 'bpmn:TextAnnotation') && noteTarget(e) && noteProblems(e, boxOf(e), noteTarget(e))).map(e => e.id);
+
+  // ---------- espacement vertical : rapprocher les branches de ce qui est au-dessus ----------
+  const ROW_GAP = 40;
+  /**
+   * Remonte chaque rangée d'éléments (éléments alignés et reliés entre eux) tant qu'il reste plus de
+   * ROW_GAP px libres au-dessus : boîtes, libellés et tracés des autres flux comptent comme obstacles.
+   */
+  function compactRows() {
+    const nodes = registry.filter(e => e.parent && e.type !== 'label' && !e.waypoints && is(e, 'bpmn:FlowNode') && !is(e, 'bpmn:BoundaryEvent'));
+    const parentOf = new Map(nodes.map(n => [n, n]));
+    const find = n => { while (parentOf.get(n) !== n) n = parentOf.get(n); return n; };
+    const cyOf = e => e.y + e.height / 2;
+    for (const n of nodes) for (const c of n.outgoing || []) {
+      const t = c.target;
+      if (parentOf.has(t) && t.parent === n.parent && Math.abs(cyOf(t) - cyOf(n)) < 3) parentOf.set(find(t), find(n));
+    }
+    const groups = new Map();
+    for (const n of nodes) { const r = find(n); if (!groups.has(r)) groups.set(r, []); groups.get(r).push(n); }
+    const list = [...groups.values()].sort((a, b) => Math.min(...a.map(e => e.y)) - Math.min(...b.map(e => e.y)));
+    let moved = 0;
+    for (const g of list) {
+      const inG = new Set(g.flatMap(m => [m, ...(m.attachers || [])]));
+      const flowsOfG = new Set(g.flatMap(m => [m, ...(m.attachers || [])]).flatMap(m => [...(m.incoming || []), ...(m.outgoing || [])]));
+      const parent = g[0].parent;
+      const lanes = (parent.children || []).filter(e => is(e, 'bpmn:Lane'));
+      let lift = Infinity;
+      for (const m of g) {
+        const top = Math.min(m.y, ...ownLabel(m).map(l => l.y));
+        const x0 = m.x - 10, x1 = m.x + m.width + 10;
+        let floor = -Infinity;
+        for (const e of registry.getAll()) {
+          if (!e.parent || inG.has(e) || e === parent) continue;
+          if (e.type === 'label') {
+            if (!e.width || inG.has(e.labelTarget) || flowsOfG.has(e.labelTarget)) continue;
+            const t = e.labelTarget; if (t.parent !== parent && t.host?.parent !== parent && t.source?.parent !== parent) continue;
+            if (e.x < x1 && e.x + e.width > x0 && e.y + e.height <= top) floor = Math.max(floor, e.y + e.height + 15);
+            continue;
+          }
+          if (e.waypoints) {
+            if (flowsOfG.has(e) || e.parent !== parent) continue;
+            for (const [p, q] of segsOfPts(e.waypoints)) if (Math.abs(p.y - q.y) < 1 && p.y <= top && Math.min(p.x, q.x) < x1 && Math.max(p.x, q.x) > x0) floor = Math.max(floor, p.y + 20);
+            continue;
+          }
+          if (e.parent !== parent || is(e, 'bpmn:Lane')) continue;
+          if (e.x < x1 && e.x + e.width > x0 && e.y + e.height <= top) floor = Math.max(floor, e.y + e.height + ROW_GAP);
+        }
+        const lane = lanes.find(l => cyOf(m) > l.y && cyOf(m) < l.y + l.height);
+        if (lane) floor = Math.max(floor, lane.y + 15);
+        const area = areaOf(m);
+        if (area) floor = Math.max(floor, area.y + 5);
+        if (floor === -Infinity) { lift = 0; break; }
+        lift = Math.min(lift, top - floor);
+      }
+      if (!(lift > 15) || lift === Infinity) continue;
+      const dy = -Math.floor(lift);
+      modeling.moveElements(g, { x: 0, y: dy });
+      if (g.some(m => !freeAt(m, 0, 0, obstaclesFor(m), areaOf(m)))) modeling.moveElements(g, { x: 0, y: -dy });
+      else moved += g.length;
+    }
+    return moved;
+  }
+
   // ---------- sorties de passerelle : une flèche par côté ----------
   /** Côté par lequel un flux quitte sa source : top, bottom, left, right. */
-  function exitSide(c) {
-    const s = c.source, p = c.waypoints[0];
+  function exitSide(c, pts = c.waypoints) {
+    const s = c.source, p = pts[0];
     const cx = s.x + s.width / 2, cy = s.y + s.height / 2;
     const dx = p.x - cx, dy = p.y - cy;
-    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) { const q = c.waypoints[1] || p; return Math.abs(q.x - cx) > Math.abs(q.y - cy) ? (q.x > cx ? 'right' : 'left') : (q.y > cy ? 'bottom' : 'top'); }
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) { const q = pts[1] || p; return Math.abs(q.x - cx) > Math.abs(q.y - cy) ? (q.x > cx ? 'right' : 'left') : (q.y > cy ? 'bottom' : 'top'); }
     return Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
   }
   /** Tracé partant d'un côté donné de la source. */
@@ -300,7 +560,9 @@ export function createApplier(modeler) {
 
 
   /** Trace un flux par des points de passage (coudes), extrémités calées sur le bord des éléments. */
-  function routeVia(c, via) {
+  function routeVia(c, via) { modeling.updateWaypoints(c, computeVia(c, via)); }
+  /** Points d'un tracé par des points de passage, sans rien modifier. */
+  function computeVia(c, via) {
     const pts = via.map(p => {
       if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) throw new OpError('chaque point de passage doit avoir x et y');
       return { x: Math.round(p.x), y: Math.round(p.y) };
@@ -312,8 +574,7 @@ export function createApplier(modeler) {
     const start = Math.abs(first.x - s.x) < Math.abs(first.y - s.y) ? { x: first.x, y: s.y } : { x: s.x, y: first.y };
     const end = Math.abs(last.x - t.x) < Math.abs(last.y - t.y) ? { x: last.x, y: t.y } : { x: t.x, y: last.y };
     const raw = [start, ...pts, end];
-    const cropped = docking.getCroppedWaypoints({ ...c, waypoints: raw }, c.source, c.target);
-    modeling.updateWaypoints(c, cropped);
+    return docking.getCroppedWaypoints({ ...c, waypoints: raw }, c.source, c.target).map(p => ({ x: Math.round(p.x), y: Math.round(p.y) }));
   }
 
   const refs = new Map(); // ref proposé par Claude → id réel
@@ -345,12 +606,13 @@ export function createApplier(modeler) {
   /** Refuse un nom qui déborderait de sa boîte (les tâches ont une taille fixe). */
   function checkFits(el, name) {
     if (!name || el.waypoints) return;
-    const o = labelOverflow(el.type, name, { width: el.width, height: el.height, expanded: is(el, 'bpmn:SubProcess') && el.collapsed === false });
+    const o = labelOverflow(el.type, name, { width: el.width, height: el.height, expanded: is(el, 'bpmn:SubProcess') && el.collapsed === false, boundary: !!el.attachers?.length });
     if (o) throw new OpError(`« ${name} » : ${overflowText(o)} ${overflowFix(o)}`);
   }
 
   function finish(shape, op) {
     if (op.ref) refs.set(op.ref, shape.id);
+    if (typeof op.name === 'string') op.name = op.name.trim();
     checkFits(shape, op.name);
     if (op.name) modeling.updateLabel(shape, op.name);
     if (op.timer) setTimer(shape, op.timer.kind, op.timer.value);
@@ -425,13 +687,18 @@ export function createApplier(modeler) {
     return { boxes, labels, segments };
   }
 
+  /** Le segment [p, q] passe-t-il à l'intérieur du rectangle r ? (calcul exact, Liang–Barsky) */
   function segmentHits(p, q, r) {
-    const len = Math.hypot(q.x - p.x, q.y - p.y), n = Math.max(1, Math.ceil(len / 6));
-    for (let i = 0; i <= n; i++) {
-      const x = p.x + (q.x - p.x) * i / n, y = p.y + (q.y - p.y) * i / n;
-      if (x > r.x && x < r.x + r.width && y > r.y && y < r.y + r.height) return true;
+    let t0 = 0, t1 = 1;
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const P = [-dx, dx, -dy, dy], Q = [p.x - r.x, r.x + r.width - p.x, p.y - r.y, r.y + r.height - p.y];
+    for (let i = 0; i < 4; i++) {
+      if (P[i] === 0) { if (Q[i] <= 0) return false; continue; }
+      const t = Q[i] / P[i];
+      if (P[i] < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+      else { if (t < t0) return false; if (t < t1) t1 = t; }
     }
-    return false;
+    return t1 - t0 > 1e-6;
   }
 
   /** Zone utile du conteneur (sous-processus déplié, pool, couloir) ; null au niveau du processus. */
@@ -524,11 +791,24 @@ export function createApplier(modeler) {
       && (e.parent === parent) && !(isContainerShape(e) && encloses(e, shape)) && hit(inflate(boxOf(shape), 2), boxOf(e))).map(e => e.id);
   }
 
+  /** Après un déplacement : redresser les flux reliés qui peuvent l'être, replacer libellés et commentaires. */
+  function afterMove(el) {
+    if (is(el, 'bpmn:TextAnnotation')) { placeNote(el); return; }
+    const ends = [el, ...(el.attachers || [])];
+    const flows = [...new Set(ends.flatMap(e => [...(e.incoming || []), ...(e.outgoing || [])]).filter(c => is(c, 'bpmn:SequenceFlow')))];
+    for (const c of flows) improveRoute(c);
+    for (const g of new Set(flows.flatMap(c => [c.source, c.target]).filter(x => is(x, 'bpmn:Gateway')))) fixGatewayExits(g);
+    normalizeLabels([...ends.flatMap(e => ownLabel(e)), ...flows.map(c => c.label)]);
+    for (const n of ends.flatMap(e => noteLinks(e)).map(a => a.source === el ? a.target : a.source).filter(x => is(x, 'bpmn:TextAnnotation'))) placeNote(n);
+  }
+
   const OPS = {
     update(op) {
       const el = get(op.id);
+      if (typeof op.name === 'string') op.name = op.name.trim();
       if (op.name !== undefined) { checkFits(el, op.name); modeling.updateLabel(el, op.name); }
       if (op.documentation !== undefined) setDoc(el, op.documentation);
+      if (is(el, 'bpmn:TextAnnotation')) { fitAnnotation(el); placeNote(el); }
     },
 
     append(op) {
@@ -572,6 +852,10 @@ export function createApplier(modeler) {
       const created = modeling.createShape(shape, pos, host, { attach: true });
       finish(created, op);
       if (op.interrupting === false) modeling.updateProperties(created, { cancelActivity: false });
+      // l'événement recouvre le bas de la boîte : son nom doit tenir en 4 lignes
+      const hostName = getBusinessObject(host).name;
+      const o = hostName && labelOverflow(host.type, hostName, { width: host.width, height: host.height, expanded: is(host, 'bpmn:SubProcess') && host.collapsed === false, boundary: true });
+      if (o) notes.push(`« ${hostName} » (${host.id}) porte maintenant un événement de bordure : ${overflowText(o)} ${overflowFix(o)}`);
     },
 
     connect(op) {
@@ -581,7 +865,7 @@ export function createApplier(modeler) {
       if (op.ref) refs.set(op.ref, c.id);
       if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
       else if (op.route) routeShape(c, op.route);
-      else loopBelowIfBackward(c);
+      else { loopBelowIfBackward(c); improveRoute(c); untanglePair(c); }
       fixGatewayExits(a);
       if (op.name) modeling.updateLabel(c, op.name);
       if (op.condition) modeling.updateProperties(c, { conditionExpression: expr(op.condition) });
@@ -620,18 +904,32 @@ export function createApplier(modeler) {
      * libellés qui se chevauchent déplacés. Compte rendu dans notes.
      */
     tidy() {
-      let exits = 0, flows = 0, labels = 0;
-      for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
-      for (const c of registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints)) if (untangle(c)) flows++;
-      for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
-      for (const l of registry.filter(e => e.type === 'label' && e.width && e.labelTarget)) if (freeLabel(l)) labels++;
-      const remaining = registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints).map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
-      const stacked = registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints).filter(c => flowConflicts(c).overlap).map(c => c.id);
+      let exits = 0, flows = 0, notesFixed = 0;
+      const allNotes = registry.filter(e => is(e, 'bpmn:TextAnnotation'));
+      for (const n of allNotes) if (fitAnnotation(n)) notesFixed++;
+      const rows = compactRows();
+      const seqFlows = () => registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints);
+      const gateways = () => registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label');
+      for (const g of gateways()) exits += fixGatewayExits(g);
+      const touched = new Set();
+      for (const c of seqFlows()) if (untangle(c)) touched.add(c.id);
+      // croisements, superpositions, virages évitables : retracer aussi l'autre flux si c'est mieux
+      for (const c of seqFlows()) { const i = routeInfo(c); if ((!i.clean || i.bends) && untanglePair(c)) touched.add(c.id); }
+      for (const g of gateways()) exits += fixGatewayExits(g);
+      flows = touched.size;
+      const labels = normalizeLabels(registry.filter(e => e.type === 'label'));
+      for (const n of allNotes) if (placeNote(n)) notesFixed++;
+      const remaining = seqFlows().map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
+      const stacked = seqFlows().filter(c => flowConflicts(c).overlap).map(c => c.id);
+      const crossing = seqFlows().filter(c => flowConflicts(c).cross).map(c => c.id);
       const clashes = registry.filter(e => e.type === 'label' && e.width && e.labelTarget && labelClashes(e).length).map(l => l.labelTarget.id);
-      notes.push(`Retouches : ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) déplacé(s).`
+      const badNotes = noteCrossings();
+      notes.push(`Retouches : ${rows} élément(s) remonté(s), ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) replacé(s), ${notesFixed} commentaire(s) ajusté(s).`
         + (remaining.length ? ` Flux qui traversent encore un élément : ${remaining.map(([id, h]) => `${id} (${h.join(', ')})`).join(' ; ')}.` : ' Plus aucun flux ne traverse un élément.')
         + (stacked.length ? ` Flux encore superposés à un autre : ${stacked.join(', ')}.` : '')
-        + (clashes.length ? ` Libellés encore en chevauchement : ${clashes.join(', ')}.` : ''));
+        + (crossing.length ? ` Flux qui en croisent encore un autre : ${crossing.join(', ')} (déplacer une branche peut les supprimer).` : '')
+        + (clashes.length ? ` Libellés encore en chevauchement : ${clashes.join(', ')}.` : '')
+        + (badNotes.length ? ` Commentaires mal placés : ${badNotes.join(', ')}.` : ''));
     },
 
     /** Retrace un flux existant : forme du tracé (route) ou points de passage (via). */
@@ -688,6 +986,7 @@ export function createApplier(modeler) {
       const delta = { x: Math.round(tx - cx), y: Math.round(ty - cy) };
       if (delta.x || delta.y) modeling.moveElements([el], delta); // moveElements : le libellé suit
       if (op.avoid_overlap !== false) placeFree(el);
+      afterMove(el);
     },
 
     set_timer(op) { setTimer(get(op.id), op.kind, op.value); },
@@ -781,6 +1080,11 @@ export function createApplier(modeler) {
     }
     const after = ids();
     const added = [...after].filter(id => !before.has(id));
+    try {
+      const fresh = added.map(id => registry.get(id)).filter(Boolean);
+      for (const n of fresh.filter(e => is(e, 'bpmn:TextAnnotation'))) { fitAnnotation(n); placeNote(n); }
+      normalizeLabels(fresh.map(e => e.label).filter(Boolean));
+    } catch (e) { console.warn('mise en forme des ajouts', e); }
     const changed = [...touched].filter(id => after.has(id) && registry.get(id));
     // compte rendu de placement : un élément ajouté ou déplacé qui en recouvre encore un autre
     const overlaps = [];

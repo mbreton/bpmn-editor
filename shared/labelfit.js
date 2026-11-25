@@ -1,5 +1,5 @@
 // Le texte tient-il dans la boîte ? Les tâches ont une taille fixe (100 × 80) : au-delà de
-// 5 lignes, le texte déborde. Estimation par largeur de caractères (Arial 12 px, marge de 7 px, comme bpmn-js),
+// 5 lignes (4 si un événement de bordure est posé dessus), le texte déborde. Estimation par largeur de caractères (Arial 12 px, marge de 7 px, comme bpmn-js),
 // avec le même retour à la ligne par mots ; utilisable côté serveur comme dans le navigateur.
 
 // largeurs Arial (unités pour 1000), comme le rendu de bpmn-js (Arial 12 px)
@@ -38,7 +38,7 @@ const BOXED = /^bpmn:(Task|UserTask|ServiceTask|ScriptTask|SendTask|ReceiveTask|
  * Vérifie le nom d'un élément dont on connaît le type (et la taille, par défaut 100 × 80).
  * Renvoie null si ça tient, sinon { lines, maxLines, length, suggest } (suggest = longueur visée).
  */
-export function labelOverflow(type, name, { width: w = 100, height: h = 80, expanded = false } = {}) {
+export function labelOverflow(type, name, { width: w = 100, height: h = 80, expanded = false, boundary = false } = {}) {
   if (!name || expanded || !BOXED.test(type)) {
     // libellés externes (événements, passerelles) : 90 px de large, 4 lignes au plus
     if (!name || BOXED.test(type) || !/Event$|Gateway$/.test(type)) return null;
@@ -46,7 +46,8 @@ export function labelOverflow(type, name, { width: w = 100, height: h = 80, expa
     return lines > maxLines ? { lines, maxLines, length: name.length, suggest: Math.floor(name.length * maxLines / lines) - 3 } : null;
   }
   // bpmn-js : marge intérieure de 7 px à gauche et à droite, texte centré verticalement
-  const maxLines = Math.max(1, Math.floor(h / LINE_HEIGHT));
+  // un événement de bordure (horloge…) recouvre le bas de la boîte : 4 lignes au plus
+  const maxLines = Math.max(1, Math.floor(h / LINE_HEIGHT) - (boundary ? 1 : 0));
   const lines = lineCount(name, w - 14);
   return lines > maxLines ? { lines, maxLines, length: name.length, suggest: Math.floor(name.length * maxLines / lines) - 3 } : null;
 }

@@ -35,6 +35,8 @@ export const FIXES = {
   'flow-crosses': 'Retracez le flux pour qu\'il contourne l\'élément (glissez un de ses coudes), ou déplacez l\'élément. Claude : opération reroute, ou tidy.',
   'gateway-exits': 'Faites partir chaque flèche d\'un côté différent de la passerelle (glissez le départ de la flèche sur un autre coin). Claude : reroute avec side.',
   'flow-overlap': 'Faites passer l\'une des deux flèches par un couloir libre (au-dessus ou au-dessous), quitte à rallonger un peu. Claude : reroute, ou tidy.',
+  'flow-cross': 'Déplacez la branche concernée (ou retracez l\'autre flèche) pour que les deux traits ne se coupent plus. Claude : move sur un élément de la branche, reroute, ou tidy.',
+  'association-crosses': 'Placez le commentaire près de son élément, à un endroit d\'où son pointillé ne traverse ni boîte ni flèche. Claude : tidy, ou move sur le commentaire.',
   'label-overlap': 'Déplacez le libellé à la souris (cliquez dessus puis glissez). Claude : move avec label:true, ou tidy.'
 };
 
@@ -57,6 +59,8 @@ export function checkCoherence(definitions) {
   // tailles dessinées (pour savoir si le nom tient dans la boîte)
   const shapes = new Map();
   for (const d of definitions.diagrams || []) for (const pe of d.plane?.planeElement || []) if (pe.bounds && pe.bpmnElement) shapes.set(pe.bpmnElement.id, pe);
+  // activités qui portent un événement de bordure (leur texte a une ligne de moins)
+  const hosts = new Set([...shapes.values()].map(pe => pe.bpmnElement).filter(e => is(e, 'bpmn:BoundaryEvent') && e.attachedToRef).map(e => e.attachedToRef.id));
 
   const walk = container => {
     const elements = container.flowElements || [];
@@ -110,7 +114,7 @@ export function checkCoherence(definitions) {
       }
       if (e.name) {
         const pe = shapes.get(e.id);
-        const o = labelOverflow(e.$type, e.name, { width: pe?.bounds?.width, height: pe?.bounds?.height, expanded: !!pe?.isExpanded });
+        const o = labelOverflow(e.$type, e.name, { width: pe?.bounds?.width, height: pe?.bounds?.height, expanded: !!pe?.isExpanded, boundary: hosts.has(e.id) });
         if (o) out.push({ id: e.id, name: nameOf(e), level: 'warn', text: overflowText(o), rule: 'label-too-long', fix: overflowFix(o) });
       }
       if (e.flowElements) walk(e);
@@ -181,6 +185,34 @@ export function geometryIssues(definitions) {
       reported.add(B.el.id);
       out.push({ id: B.el.id, name: nameOf(B.el) || `${nameOf(B.el.sourceRef)} → ${nameOf(B.el.targetRef)}`, level: 'warn', text: `le flux est superposé au flux ${A.el.id} sur ${Math.round(worst)} px.`, rule: 'flow-overlap', fix: FIXES['flow-overlap'] });
     }
+  }
+
+  // deux flux qui se coupent (à vérifier : un croisement est parfois inévitable)
+  const cut = (p1, p2, p3, p4) => {
+    const d = (p2.x - p1.x) * (p4.y - p3.y) - (p2.y - p1.y) * (p4.x - p3.x);
+    if (Math.abs(d) < 1e-9) return false;
+    const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / d;
+    const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / d;
+    return t > 0.02 && t < 0.98 && u > 0.02 && u < 0.98;
+  };
+  const cutReported = new Set();
+  for (let i = 0; i < seqEdges.length; i++) for (let j = i + 1; j < seqEdges.length; j++) {
+    const A = seqEdges[i], B = seqEdges[j];
+    if ([A.el.sourceRef, A.el.targetRef].some(x => x && (x === B.el.sourceRef || x === B.el.targetRef))) continue;
+    if (!segs(A.pts).some(a => segs(B.pts).some(b => cut(a[0], a[1], b[0], b[1])))) continue;
+    if (cutReported.has(B.el.id)) continue;
+    cutReported.add(B.el.id);
+    out.push({ id: B.el.id, name: nameOf(B.el) || `${nameOf(B.el.sourceRef)} → ${nameOf(B.el.targetRef)}`, level: 'info', text: `le flux croise le flux ${A.el.id}.`, rule: 'flow-cross', fix: FIXES['flow-cross'] });
+  }
+
+  // pointillés d'un commentaire qui traversent une boîte ou une flèche
+  for (const { el, pts } of edges) {
+    if (!is(el, 'bpmn:Association')) continue;
+    const ends = new Set([el.sourceRef?.id, el.targetRef?.id, el.sourceRef?.attachedToRef?.id, el.targetRef?.attachedToRef?.id].filter(Boolean));
+    const note = [el.sourceRef, el.targetRef].find(x => is(x, 'bpmn:TextAnnotation')) || el.sourceRef;
+    const box = shapes.find(sh => !ends.has(sh.el.id) && !ignorable(sh) && !isContainer(sh) && segs(pts).some(([p, q]) => segHits(p, q, sh.b)));
+    const line = !box && seqEdges.find(e => segs(pts).some(([p, q]) => segs(e.pts).some(([r, t]) => cut(p, q, r, t))));
+    if (box || line) out.push({ id: note?.id || el.id, name: `Commentaire « ${String(note?.text || '').trim().replace(/\s+/g, ' ').slice(0, 40)} »`, level: 'warn', text: `son pointillé ${box ? `traverse « ${nameOf(box.el)} »` : `coupe le flux ${line.el.id}`}.`, rule: 'association-crosses', fix: FIXES['association-crosses'] });
   }
 
   // sorties de passerelle qui partent du même côté

@@ -72,6 +72,9 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
           byParent.get(parent).push(`  [${el.id}] ${el.$type.replace('bpmn:', '')}${el.name ? ` « ${el.name.replace(/\s+/g, ' ')} »` : ''} : x=${Math.round(b.x)} y=${Math.round(b.y)} ${Math.round(b.width)}×${Math.round(b.height)}${lb ? ` · libellé x=${Math.round(lb.x)} y=${Math.round(lb.y)} ${Math.round(lb.width)}×${Math.round(lb.height)}` : ''}`);
         }
         for (const [parent, items] of byParent) lines.push(`Dans ${parent || 'le diagramme'} :`, ...items);
+        // libellés des flux (pour les déplacer avec move + label:true)
+        const named = (d.plane?.planeElement || []).filter(pe => pe.waypoint?.length && pe.label?.bounds && pe.bpmnElement?.name);
+        if (named.length) lines.push('Libellés des flux :', ...named.map(pe => { const lb = pe.label.bounds, w = pe.waypoint; return `  [${pe.bpmnElement.id}] « ${pe.bpmnElement.name} » : libellé x=${Math.round(lb.x)} y=${Math.round(lb.y)} ${Math.round(lb.width)}×${Math.round(lb.height)} · tracé ${w.map(p => `(${Math.round(p.x)},${Math.round(p.y)})`).join(' ')}`; }));
       }
       return lines.join('\n');
     }

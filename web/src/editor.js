@@ -243,7 +243,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     if (importing || ctx.previewing) return;
     const el = context.element?.labelTarget || context.element;
     if (!el || el.waypoints) return;
-    const o = labelOverflow(el.type, context.newLabel, { width: el.width, height: el.height, expanded: el.type.endsWith('SubProcess') && el.collapsed === false });
+    const o = labelOverflow(el.type, context.newLabel, { width: el.width, height: el.height, expanded: el.type.endsWith('SubProcess') && el.collapsed === false, boundary: !!el.attachers?.length });
     if (o) toast(`Texte trop long pour la boîte (${o.lines} lignes pour ${o.maxLines}) : visez ${o.suggest} caractères environ et mettez le détail dans la documentation (panneau Propriétés).`, 'error');
   });
 

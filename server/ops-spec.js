@@ -1,5 +1,5 @@
 // Description des opérations de modification, donnée à Claude (outil apply_changes du connecteur MCP).
-export const OPS_SPEC = `NAMES MUST FIT THEIR SHAPE: a task box (100×80) holds 5 short lines, about 55 characters; event and gateway labels about 4 lines (≈ 60 characters). Write short names (verb + object) and put details, rules, thresholds and legal references in "documentation". A name that would overflow is rejected with the length to aim for.
+export const OPS_SPEC = `NAMES MUST FIT THEIR SHAPE: a task box (100×80) holds 5 short lines, about 55 characters (4 lines, about 45 characters, if it carries a boundary event); event and gateway labels about 4 lines (≈ 60 characters). Write short names (verb + object) and put details, rules, thresholds and legal references in "documentation". A name that would overflow is rejected with the length to aim for.
 
 Each change is an object:
 { "title": "short title in French",
@@ -18,8 +18,16 @@ Operations (use existing ids from the diagram; give new elements a readable uniq
 - {"op":"delete","id":"<id>"}   (deleting an element that has exactly one incoming and one outgoing flow reconnects its neighbours automatically: do not add a "connect" for them)
 - {"op":"reroute","id":"<sequenceFlowId>","route":"h:v|v:h|h:h|v:v"}   (redraw a flow: h:v = leave horizontally then turn vertically, v:h = leave vertically first…; or "via":[{"x":..,"y":..},…] bend points for a precise path, e.g. to loop back below the main line. "connect" also accepts "route" and "via"; without them, a flow going back to the left is automatically drawn below the elements it passes)
 - {"op":"add","ref":"<newId>","in":"<expandedSubProcessOrParticipantId>","type":"bpmn:StartEvent","name":"…","x":…,"y":…}   (creates an unconnected element inside a container, e.g. the first element of an empty sub-process; x/y = centre, optional). To expand a collapsed sub-process first: {"op":"replace","id":"<id>","type":"bpmn:SubProcess","expanded":true}
-- READABILITY: a flow must never be drawn on top of another flow (same line) or through an element; prefer a free corridor even if slightly longer, and keep crossings to a minimum. connect/tidy pick such a route automatically; the coherence check reports what is left.
-- {"op":"tidy"}   (clean-up pass on the whole diagram: one exit side per gateway flow, back-flows drawn below, flows crossing elements redrawn, overlapping labels moved; reports what is left. Run automatically after relayout)
+- READABILITY (the user's drawing rules):
+  · a flow must never be drawn on top of another flow or through an element; keep crossings to a minimum, then bends: the most direct line wins (straight when the two shapes face each other).
+  · when a flow crosses another, do not only redraw YOUR flow: ask whether the OTHER flow or the OTHER branch should move instead (e.g. move the elements of the other branch above the main line with "move", so both lines become straight). Prefer moving a branch over a long detour.
+  · never touch a flow that is already straight and conflict-free; after moving elements, straighten the flows that can now be straight (move and tidy do it).
+  · keep vertical gaps tight (about 40 px between rows); do not leave a branch far below what is above it.
+  · labels sit at a fixed small distance: a gateway name just above it (or below), an event name just below it, a flow name right next to its first segment, never on a line.
+  · a comment (TextAnnotation) goes next to its element in a free spot; its dotted line must cross no box and no flow; no trailing line breaks in its text.
+  · a task carrying a boundary event (clock…) holds 4 lines of text, not 5.
+  connect/move/tidy apply these automatically; the coherence check reports what is left (flow crossings are listed as « à vérifier »).
+- {"op":"tidy"}   (clean-up pass on the whole diagram: rows pulled up when the gap above is too large, one exit side per gateway flow, flows redrawn (fewest conflicts then fewest bends, possibly redrawing the other flow of a crossing), labels re-placed at their fixed distance, comments trimmed, resized and moved next to their element; reports what is left. Run automatically after relayout)
 - reroute also accepts "side":"top|bottom|left|right" = the side of the source the flow leaves from. Two flows must never leave a gateway from the same side (it would look like one branches off the other): reroute refuses it.
 - {"op":"move","id":"<id>","next_to":"<otherId>","side":"right|left|below|above","gap":50}   (or "x","y" = new centre, or "dx","dy"; connected flows follow; if the spot is taken the element slides to the nearest free spot unless "avoid_overlap":false). With "label":true and dx/dy, moves only the label of an element or a flow
 - {"op":"set_timer","id":"<eventId>","kind":"timeDuration|timeDate|timeCycle","value":"P3D"}
