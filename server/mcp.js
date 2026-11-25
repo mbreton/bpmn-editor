@@ -143,7 +143,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       const before = (await checkDiagram((await diagrams.get(d.id)).xml)).issues || [];
       const r = await hub.request(d.id, user.id, { type: 'apply', changes }, 30000);
       if (!r) return fail(notOpen(d));
-      const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}${x.overlaps?.length ? `\n  ⚠ chevauchement à corriger (opération move) : ${x.overlaps.join(' ; ')}` : ''}` : `✗ ${x.title} : ${x.error}`);
+      const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}${x.overlaps?.length ? `\n  ⚠ chevauchement à corriger (opération move) : ${x.overlaps.join(' ; ')}` : ''}${x.notes?.length ? `\n  ${x.notes.join('\n  ')}` : ''}` : `✗ ${x.title} : ${x.error}`);
       if (r.rejected) {
         return fail(`Rien n'a été appliqué : la modification introduit ${r.issues.length > 1 ? 'des problèmes bloquants' : 'un problème bloquant'}. Corrigez puis renvoyez l'ensemble.\n${r.issues.map(i => `- ${formatIssue(i)}`).join('\n')}${lines.length ? `\n\nDétail des opérations (annulées) :\n${lines.join('\n')}` : ''}`);
       }
@@ -186,7 +186,12 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       const locked = guardLock(d); if (locked) return fail(locked);
       try {
         const r = await layout(d, { ...user, name: `${user.name} (via Claude)` });
-        return text(`Disposition recalculée en ${r.ms} ms${r.warnings.length ? ` (avertissements : ${r.warnings.join(', ')})` : ''}. Visible à l'écran, annulable avec undo. Vérifiez le rendu avec view_diagram.`);
+        // passe de retouche dans la page : sorties de passerelle, flux qui traversent, libellés
+        let tidy = 'Passe de retouche non faite (diagramme ouvert dans aucun navigateur).';
+        const t = await hub.request(d.id, user.id, { type: 'apply', changes: [{ title: 'Retouches après réorganisation', ops: [{ op: 'tidy' }] }] }, 30000);
+        if (t?.ok) tidy = t.results?.[0]?.notes?.join(' ') || 'Retouches faites.';
+        else if (t) tidy = `Passe de retouche impossible : ${t.error || t.results?.[0]?.error || 'erreur'}.`;
+        return text(`Disposition recalculée en ${r.ms} ms${r.warnings.length ? ` (avertissements : ${r.warnings.join(', ')})` : ''}. ${tidy}\nVisible à l'écran ; « undo » annule les retouches, un second « undo » la réorganisation. Vérifiez avec view_diagram (element_ids sur les zones signalées).`);
       } catch (e) { return fail(`Réorganisation impossible : ${e.message}`); }
     });
 

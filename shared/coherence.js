@@ -31,7 +31,10 @@ export const FIXES = {
   refs: 'Facultatif : donnez un nom au message / à l\'erreur dans les propriétés, pour savoir précisément lequel est attendu.',
   conditional: 'Saisissez la condition qui déclenche l\'événement.',
   start: 'Ajoutez un événement de début (cercle fin) au point de départ du processus.',
-  'label-too-long': ''
+  'label-too-long': '',
+  'flow-crosses': 'Retracez le flux pour qu\'il contourne l\'élément (glissez un de ses coudes), ou déplacez l\'élément. Claude : opération reroute, ou tidy.',
+  'gateway-exits': 'Faites partir chaque flèche d\'un côté différent de la passerelle (glissez le départ de la flèche sur un autre coin). Claude : reroute avec side.',
+  'label-overlap': 'Déplacez le libellé à la souris (cliquez dessus puis glissez). Claude : move avec label:true, ou tidy.'
 };
 
 /** Délai lisible ? Renvoie un message d'erreur, ou null si correct. */
@@ -118,7 +121,76 @@ export function checkCoherence(definitions) {
     const nodes = walk(p);
     if (nodes.length && !nodes.some(n => is(n, 'bpmn:StartEvent'))) add(p, 'warn', 'aucun événement de début.', 'start');
   }
+  out.push(...geometryIssues(definitions));
   return sortIssues(out);
+}
+
+/**
+ * Lisibilité du dessin (à partir des coordonnées) : flux qui traversent un élément, sorties de
+ * passerelle qui partent du même côté, libellés qui recouvrent un élément ou un autre libellé.
+ */
+export function geometryIssues(definitions) {
+  const out = [];
+  const shapes = [], edges = [], labels = [];
+  for (const d of definitions.diagrams || []) for (const pe of d.plane?.planeElement || []) {
+    const el = pe.bpmnElement; if (!el) continue;
+    if (pe.waypoint?.length) edges.push({ el, pts: pe.waypoint.map(p => ({ x: p.x, y: p.y })) });
+    else if (pe.bounds) shapes.push({ el, b: pe.bounds, expanded: !!pe.isExpanded });
+    if (pe.label?.bounds && el.name) labels.push({ el, b: pe.label.bounds });
+  }
+  const byId = new Map(shapes.map(s => [s.el.id, s]));
+  const hitPt = (b, p, m = 0) => p.x > b.x + m && p.x < b.x + b.width - m && p.y > b.y + m && p.y < b.y + b.height - m;
+  const segHits = (p, q, b) => { const n = Math.max(1, Math.ceil(Math.hypot(q.x - p.x, q.y - p.y) / 5)); for (let i = 0; i <= n; i++) if (hitPt(b, { x: p.x + (q.x - p.x) * i / n, y: p.y + (q.y - p.y) * i / n }, 3)) return true; return false; };
+  const isContainer = s => is(s.el, 'bpmn:Participant') || is(s.el, 'bpmn:Lane') || (is(s.el, 'bpmn:SubProcess') && s.expanded);
+  const contains = (b, p) => p.x >= b.x && p.x <= b.x + b.width && p.y >= b.y && p.y <= b.y + b.height;
+  const ignorable = s => is(s.el, 'bpmn:TextAnnotation') || is(s.el, 'bpmn:Group');
+
+  // flux qui traversent un élément
+  for (const { el, pts } of edges) {
+    if (!is(el, 'bpmn:SequenceFlow') && !is(el, 'bpmn:MessageFlow')) continue;
+    const src = el.sourceRef, tgt = el.targetRef;
+    const ends = new Set([src, tgt, src?.attachedToRef, tgt?.attachedToRef].filter(Boolean).map(e => e.id));
+    for (const s of shapes) {
+      if (ends.has(s.el.id) || ignorable(s)) continue;
+      if (is(s.el, 'bpmn:BoundaryEvent') && (ends.has(s.el.attachedToRef?.id))) continue;
+      if (isContainer(s)) { if (is(s.el, 'bpmn:Participant') || is(s.el, 'bpmn:Lane') || (contains(s.b, pts[0]) && contains(s.b, pts.at(-1))) || el.$type === 'bpmn:MessageFlow') continue; }
+      let crossed = false;
+      for (let i = 1; i < pts.length && !crossed; i++) crossed = segHits(pts[i - 1], pts[i], s.b);
+      if (crossed) out.push({ id: el.id, name: nameOf(el) || `${nameOf(src)} → ${nameOf(tgt)}`, level: 'warn', text: `le flux traverse « ${nameOf(s.el)} » (${s.el.id}).`, rule: 'flow-crosses', fix: FIXES['flow-crosses'] });
+    }
+  }
+
+  // sorties de passerelle qui partent du même côté
+  const sideOf = (b, pts) => {
+    const c = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    let p = pts[0];
+    if (Math.abs(p.x - c.x) < 2 && Math.abs(p.y - c.y) < 2) p = pts[1] || p;
+    const dx = p.x - c.x, dy = p.y - c.y;
+    return Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'droite' : 'gauche') : (dy > 0 ? 'bas' : 'haut');
+  };
+  const outs = new Map();
+  for (const { el, pts } of edges) {
+    const src = el.sourceRef;
+    if (!is(el, 'bpmn:SequenceFlow') || !src || !/Gateway$/.test(src.$type)) continue;
+    const s = byId.get(src.id); if (!s) continue;
+    const side = sideOf(s.b, pts);
+    const k = `${src.id}|${side}`;
+    if (!outs.has(k)) outs.set(k, { src, side, flows: [] });
+    outs.get(k).flows.push(el.id);
+  }
+  for (const { src, side, flows } of outs.values()) if (flows.length > 1) {
+    out.push({ id: src.id, name: nameOf(src), level: 'warn', text: `${flows.length} sorties partent du même côté (${side}) : on croirait qu'elles partent l'une de l'autre (${flows.join(', ')}).`, rule: 'gateway-exits', fix: FIXES['gateway-exits'] });
+  }
+
+  // libellés qui recouvrent un élément ou un autre libellé
+  const overlap = (a, b) => a.x < b.x + b.width - 1 && b.x < a.x + a.width - 1 && a.y < b.y + b.height - 1 && b.y < a.y + a.height - 1;
+  labels.forEach((l, i) => {
+    const owner = l.el;
+    const onShape = shapes.find(s => s.el !== owner && s.el !== owner.attachedToRef && !isContainer(s) && !ignorable(s) && overlap(l.b, s.b));
+    const onLabel = labels.slice(i + 1).find(o => o.el !== owner && overlap(l.b, o.b));
+    if (onShape || onLabel) out.push({ id: owner.id, name: nameOf(owner), level: 'warn', text: `son libellé recouvre ${onShape ? `« ${nameOf(onShape.el)} »` : `le libellé de « ${nameOf(onLabel.el)} »`}.`, rule: 'label-overlap', fix: FIXES['label-overlap'] });
+  });
+  return out;
 }
 
 export const sortIssues = list => list.sort((a, b) => LEVEL_ORDER[a.level] - LEVEL_ORDER[b.level]);

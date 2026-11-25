@@ -32,11 +32,152 @@ export function createApplier(modeler) {
   const commandStack = modeler.get('commandStack');
   const docking = modeler.get('connectionDocking');
   const LAYOUTS = ['h:v', 'v:h', 'h:h', 'v:v'];
-  const layoutHint = route => {
-    if (!route) return undefined;
+  /**
+   * Forme de tracé imposée, calculée ici plutôt que par le « réparateur » de bpmn-js (qui conserve
+   * les anciens points d'accroche et peut ne rien changer) : h = horizontal, v = vertical.
+   */
+  function routeShape(c, route) {
     if (!LAYOUTS.includes(route)) throw new OpError(`tracé « ${route} » inconnu (h:v, v:h, h:h ou v:v)`);
-    return { preferredLayouts: [route] };
-  };
+    const s = c.source, t = c.target;
+    const sc = { x: s.x + s.width / 2, y: s.y + s.height / 2 }, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+    const via = route === 'h:v' ? [{ x: tc.x, y: sc.y }]
+      : route === 'v:h' ? [{ x: sc.x, y: tc.y }]
+      : route === 'h:h' ? [{ x: (sc.x + tc.x) / 2, y: sc.y }, { x: (sc.x + tc.x) / 2, y: tc.y }]
+      : [{ x: sc.x, y: (sc.y + tc.y) / 2 }, { x: tc.x, y: (sc.y + tc.y) / 2 }];
+    routeVia(c, via);
+  }
+  const sameWaypoints = (a, b) => a.length === b.length && a.every((p, i) => Math.abs(p.x - b[i].x) < 1 && Math.abs(p.y - b[i].y) < 1);
+
+  // ---------- flux qui traversent des éléments ----------
+  /** Éléments (hors extrémités, conteneurs englobants, notes) que traverse le tracé d'un flux. */
+  function crossedBy(c) {
+    if (!c.waypoints || c.waypoints.length < 2) return [];
+    const ends = new Set([c.source, c.target, c.source?.host, c.target?.host, ...(c.source?.attachers || []), ...(c.target?.attachers || [])].filter(Boolean));
+    const inside = (box, p) => p.x >= box.x && p.x <= box.x + box.width && p.y >= box.y && p.y <= box.y + box.height;
+    const a = c.waypoints[0], b = c.waypoints[c.waypoints.length - 1];
+    const hits = [];
+    for (const e of registry.getAll()) {
+      if (ends.has(e) || e.waypoints || e.type === 'label' || !e.parent || e.type === 'bpmn:Participant' && false) continue;
+      if (is(e, 'bpmn:TextAnnotation') || is(e, 'bpmn:Group') || is(e, 'bpmn:Collaboration') || is(e, 'bpmn:Process')) continue;
+      if (!Number.isFinite(e.width)) continue;
+      if ((isContainerShape(e)) && inside(e, a) && inside(e, b)) continue; // conteneur du flux
+      if (isContainerShape(e) && !is(e, 'bpmn:SubProcess')) continue;     // pool, couloir
+      const box = inflate(boxOf(e), -3);
+      for (let i = 1; i < c.waypoints.length; i++) if (segmentHits(c.waypoints[i - 1], c.waypoints[i], box)) { hits.push(e.id); break; }
+    }
+    return hits;
+  }
+
+  /** Essaie des tracés alternatifs pour un flux qui traverse des éléments ; garde le premier sans traversée. */
+  function untangle(c) {
+    if (!crossedBy(c).length) return false;
+    const keep = c.waypoints.map(p => ({ x: p.x, y: p.y }));
+    const tries = [() => loopBelowIfBackward(c), ...LAYOUTS.map(r => () => routeShape(c, r)),
+      ...['right', 'bottom', 'top', 'left'].map(sd => () => routeVia(c, viaFromSide(c, sd)))];
+    for (const t of tries) {
+      try { t(); } catch { continue; }
+      const sideClash = is(c.source, 'bpmn:Gateway') && (c.source.outgoing || []).some(o => o !== c && o.waypoints?.length && exitSide(o) === exitSide(c));
+      if (!crossedBy(c).length && !sideClash) return true;
+    }
+    modeling.updateWaypoints(c, keep);
+    return false;
+  }
+
+  // ---------- libellés qui se chevauchent ----------
+  function labelClashes(lbl) {
+    const r = inflate(boxOf(lbl), 1);
+    const owner = lbl.labelTarget;
+    return registry.getAll().filter(e => e !== lbl && e !== owner && e.parent && Number.isFinite(e.width) && !e.waypoints
+      && !isContainerShape(e) && !is(e, 'bpmn:Collaboration') && !is(e, 'bpmn:Process') && e !== owner?.host
+      && hit(r, boxOf(e)));
+  }
+  /** Déplace un libellé externe qui recouvre un élément ou un autre libellé vers une place libre proche. */
+  function freeLabel(lbl) {
+    if (!labelClashes(lbl).length) return false;
+    const owner = lbl.labelTarget;
+    const ox = lbl.x, oy = lbl.y;
+    let anchor;
+    if (owner.waypoints) {
+      // flux : milieu du plus long segment
+      let best = null;
+      for (let i = 1; i < owner.waypoints.length; i++) { const p = owner.waypoints[i - 1], q = owner.waypoints[i]; const len = Math.hypot(q.x - p.x, q.y - p.y); if (!best || len > best.len) best = { len, x: (p.x + q.x) / 2, y: (p.y + q.y) / 2 }; }
+      anchor = best;
+    } else anchor = { x: owner.x + owner.width / 2, y: owner.y + owner.height / 2 };
+    const w = lbl.width, h = lbl.height, ow = owner.waypoints ? 0 : owner.width / 2, oh = owner.waypoints ? 0 : owner.height / 2;
+    const cands = [
+      { x: anchor.x - w / 2, y: anchor.y + oh + 5 }, { x: anchor.x - w / 2, y: anchor.y - oh - 5 - h },
+      { x: anchor.x + ow + 5, y: anchor.y - h / 2 }, { x: anchor.x - ow - 5 - w, y: anchor.y - h / 2 },
+      { x: anchor.x + ow + 5, y: anchor.y + oh }, { x: anchor.x - ow - 5 - w, y: anchor.y + oh },
+      { x: anchor.x + ow + 5, y: anchor.y - oh - h }, { x: anchor.x - ow - 5 - w, y: anchor.y - oh - h }
+    ];
+    for (const p of cands) {
+      modeling.moveShape(lbl, { x: Math.round(p.x - lbl.x), y: Math.round(p.y - lbl.y) });
+      if (!labelClashes(lbl).length) return true;
+    }
+    modeling.moveShape(lbl, { x: ox - lbl.x, y: oy - lbl.y });
+    return false;
+  }
+
+  // ---------- sorties de passerelle : une flèche par côté ----------
+  /** Côté par lequel un flux quitte sa source : top, bottom, left, right. */
+  function exitSide(c) {
+    const s = c.source, p = c.waypoints[0];
+    const cx = s.x + s.width / 2, cy = s.y + s.height / 2;
+    const dx = p.x - cx, dy = p.y - cy;
+    if (Math.abs(dx) < 2 && Math.abs(dy) < 2) { const q = c.waypoints[1] || p; return Math.abs(q.x - cx) > Math.abs(q.y - cy) ? (q.x > cx ? 'right' : 'left') : (q.y > cy ? 'bottom' : 'top'); }
+    return Math.abs(dx) >= Math.abs(dy) ? (dx > 0 ? 'right' : 'left') : (dy > 0 ? 'bottom' : 'top');
+  }
+  /** Tracé partant d'un côté donné de la source. */
+  function viaFromSide(c, side) {
+    const s = c.source, t = c.target;
+    const sc = { x: s.x + s.width / 2, y: s.y + s.height / 2 }, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+    const out = 25;
+    if (side === 'right' || side === 'left') {
+      const sign = side === 'right' ? 1 : -1;
+      const edgeX = sc.x + sign * (s.width / 2 + out);
+      if (Math.abs(tc.y - sc.y) < 2) return [{ x: (sc.x + tc.x) / 2, y: sc.y }];
+      const turnX = (sign > 0 ? tc.x > edgeX : tc.x < edgeX) ? tc.x : edgeX;
+      return turnX === tc.x ? [{ x: tc.x, y: sc.y }] : [{ x: edgeX, y: sc.y }, { x: edgeX, y: tc.y }];
+    }
+    const sign = side === 'bottom' ? 1 : -1;
+    const edgeY = sc.y + sign * (s.height / 2 + out);
+    if (Math.abs(tc.x - sc.x) < 2) return [{ x: sc.x, y: (sc.y + tc.y) / 2 }];
+    const turnY = (sign > 0 ? tc.y > edgeY : tc.y < edgeY) ? tc.y : edgeY;
+    return turnY === tc.y ? [{ x: sc.x, y: tc.y }] : [{ x: sc.x, y: edgeY }, { x: tc.x, y: edgeY }];
+  }
+  /**
+   * Deux sorties d'une passerelle qui partent du même côté semblent partir l'une de l'autre :
+   * on redonne à chacune son propre côté (en gardant celui de la sortie la plus « naturelle »).
+   */
+  function fixGatewayExits(gw) {
+    if (!is(gw, 'bpmn:Gateway')) return 0;
+    const outs = (gw.outgoing || []).filter(c => c.waypoints?.length);
+    if (outs.length < 2) return 0;
+    const bySide = new Map();
+    for (const c of outs) { const side = exitSide(c); if (!bySide.has(side)) bySide.set(side, []); bySide.get(side).push(c); }
+    const used = new Set([...bySide.keys()].filter(k => bySide.get(k).length === 1));
+    let fixed = 0;
+    for (const [side, list] of bySide) {
+      if (list.length < 2) continue;
+      // garder sur ce côté le flux dont la cible est la plus alignée avec lui
+      const gc = { x: gw.x + gw.width / 2, y: gw.y + gw.height / 2 };
+      const score = c => { const t = c.target, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+        return side === 'right' ? -(tc.x - gc.x) + Math.abs(tc.y - gc.y) * 2 : side === 'left' ? (tc.x - gc.x) + Math.abs(tc.y - gc.y) * 2
+          : side === 'bottom' ? -(tc.y - gc.y) + Math.abs(tc.x - gc.x) * 2 : (tc.y - gc.y) + Math.abs(tc.x - gc.x) * 2; };
+      list.sort((a, b) => score(a) - score(b));
+      used.add(side);
+      for (const c of list.slice(1)) {
+        const t = c.target, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
+        const prefs = (tc.y > gc.y + 5 ? ['bottom'] : tc.y < gc.y - 5 ? ['top'] : []).concat(tc.x > gc.x ? ['right', 'bottom', 'top', 'left'] : ['left', 'bottom', 'top', 'right']);
+        const free = prefs.find(sd => !used.has(sd));
+        if (!free) continue;
+        routeVia(c, viaFromSide(c, free));
+        used.add(free);
+        fixed++;
+      }
+    }
+    return fixed;
+  }
   /**
    * Flux qui revient en arrière (cible à gauche de la source) : le tracé automatique part à la
    * verticale et traverse la ligne principale. On le fait passer sous les éléments qu'il enjambe.
@@ -357,11 +498,13 @@ export function createApplier(modeler) {
 
     connect(op) {
       const a = get(op.from, 'source'), b = get(op.to, 'cible');
-      const c = modeling.connect(a, b, undefined, layoutHint(op.route));
+      const c = modeling.connect(a, b);
       if (!c) throw new OpError('liaison impossible entre ces éléments');
       if (op.ref) refs.set(op.ref, c.id);
       if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
-      else if (!op.route) loopBelowIfBackward(c);
+      else if (op.route) routeShape(c, op.route);
+      else loopBelowIfBackward(c);
+      fixGatewayExits(a);
       if (op.name) modeling.updateLabel(c, op.name);
       if (op.condition) modeling.updateProperties(c, { conditionExpression: expr(op.condition) });
     },
@@ -377,13 +520,41 @@ export function createApplier(modeler) {
 
     delete(op) { modeling.removeElements([get(op.id)]); },
 
+    /**
+     * Passe de retouche (après une réorganisation, ou à la demande) : une sortie par côté pour chaque
+     * passerelle, retours en arrière par-dessous, flux qui traversent des éléments retracés,
+     * libellés qui se chevauchent déplacés. Compte rendu dans notes.
+     */
+    tidy() {
+      let exits = 0, flows = 0, labels = 0;
+      for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
+      for (const c of registry.filter(e => is(e, 'bpmn:SequenceFlow'))) if (untangle(c)) flows++;
+      for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
+      for (const l of registry.filter(e => e.type === 'label' && e.width && e.labelTarget)) if (freeLabel(l)) labels++;
+      const remaining = registry.filter(e => is(e, 'bpmn:SequenceFlow')).map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
+      const clashes = registry.filter(e => e.type === 'label' && e.width && e.labelTarget && labelClashes(e).length).map(l => l.labelTarget.id);
+      notes.push(`Retouches : ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) déplacé(s).`
+        + (remaining.length ? ` Flux qui traversent encore un élément : ${remaining.map(([id, h]) => `${id} (${h.join(', ')})`).join(' ; ')}.` : ' Plus aucun flux ne traverse un élément.')
+        + (clashes.length ? ` Libellés encore en chevauchement : ${clashes.join(', ')}.` : ''));
+    },
+
     /** Retrace un flux existant : forme du tracé (route) ou points de passage (via). */
     reroute(op) {
       const c = get(op.id);
       if (!c.waypoints) throw new OpError(`« ${op.id} » n'est pas un flux`);
+      const before = c.waypoints.map(p => ({ x: p.x, y: p.y }));
       if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
-      else if (op.route) modeling.layoutConnection(c, layoutHint(op.route));
-      else throw new OpError('indiquez route (h:v, v:h, h:h, v:v) ou via (points de passage)');
+      else if (op.route) routeShape(c, op.route);
+      else if (op.side) {
+        if (!['top', 'bottom', 'left', 'right'].includes(op.side)) throw new OpError(`côté « ${op.side} » inconnu (top, bottom, left, right)`);
+        routeVia(c, viaFromSide(c, op.side));
+      } else throw new OpError('indiquez route (h:v, v:h, h:h, v:v), side (côté de départ) ou via (points de passage)');
+      // une sortie de passerelle ne doit pas partager son côté avec une autre
+      if (is(c.source, 'bpmn:Gateway')) {
+        const clash = (c.source.outgoing || []).find(o => o !== c && o.waypoints?.length && exitSide(o) === exitSide(c));
+        if (clash) throw new OpError(`ce tracé part du même côté (${exitSide(c)}) que ${clash.id} : choisissez un autre côté de la passerelle (side)`);
+      }
+      if (sameWaypoints(before, c.waypoints)) throw new OpError('le tracé obtenu est identique à l\'actuel : donnez d\'autres points de passage ou un autre côté');
     },
 
     /**
@@ -492,7 +663,9 @@ export function createApplier(modeler) {
    * Applique une modification complète. En cas d'erreur, tout ce qu'elle a fait est annulé.
    * Renvoie { ok, added, changed, error, mark } ; mark permet d'annuler plus tard (refus).
    */
+  let notes = [];
   function apply(change) {
+    notes = [];
     const mark = commandStack._stackIdx;
     const before = ids();
     const touched = new Set();
@@ -521,7 +694,7 @@ export function createApplier(modeler) {
       const el = registry.get(id);
       return el?.waypoints ? `${id} (${el.source?.id} → ${el.target?.id})` : id;
     });
-    return { ok: true, added, addedInfo, changed, mark, overlaps };
+    return { ok: true, added, addedInfo, changed, mark, overlaps, notes };
   }
 
   function undoTo(mark) {

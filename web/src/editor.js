@@ -524,7 +524,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     try {
       for (const c of changes) {
         const r = applier.apply(c);
-        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.addedInfo || r.added || [], overlaps: r.overlaps || [] });
+        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.addedInfo || r.added || [], overlaps: r.overlaps || [], notes: r.notes || [] });
         if (r.ok) shown.push(...(c.focus || []).map(applier.resolve), ...r.added, ...r.changed);
       }
     } finally { importing = false; }
@@ -575,7 +575,8 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     } catch (e) { return { ok: false, error: `Rendu impossible : ${e.message}` }; }
   }
 
-  const live = connectLive({ diagramId: id, holder, onMessage: m => onLive(m).catch(e => console.error(e)), getState: () => ({ editing: ctx.editing, focused: document.hasFocus() }) });
+  let liveQueue = Promise.resolve();
+  const live = connectLive({ diagramId: id, holder, onMessage: m => { liveQueue = liveQueue.then(() => onLive(m)).catch(e => console.error(e)); }, getState: () => ({ editing: ctx.editing, focused: document.hasFocus() }) });
 
   return async () => {
     await leave();
