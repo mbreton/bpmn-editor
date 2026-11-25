@@ -34,7 +34,7 @@ export async function buildApp(config) {
   const build = indexFile && existsSync(indexFile) ? createHash('sha256').update(readFileSync(indexFile)).digest('hex').slice(0, 12) : 'dev';
   const hub = createHub({ log, build });
   const accounts = createAccounts({ db, auth });
-  const mcp = createMcp({ db, diagrams, hub, checkDiagram, accounts, layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
+  const mcp = createMcp({ db, diagrams, hub, checkDiagram, accounts, logActivity: (...a) => logActivity(...a), layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
   await git.init();
@@ -116,6 +116,7 @@ export async function buildApp(config) {
     const r = auth.login(req.body?.email, req.body?.password);
     if (r.error) return fail(reply, r.status, r.error);
     auth.issueSession(reply, req, r.user);
+    req.user = r.user;
     return { user: r.user };
   });
 
@@ -133,6 +134,66 @@ export async function buildApp(config) {
       fields.passwordHash = auth.hashPassword(password);
     }
     return db.updateUser(u.id, fields);
+  });
+
+  // ---------- journal d'activité : qui a consulté, modifié, enregistré quoi (page Activité de l'administration) ----------
+  const ACTIVITY = [
+    ['POST', '/api/login', 'login'], ['POST', '/api/invite/:token', 'login'],
+    ['GET', '/api/diagrams/:id', 'view'], ['PUT', '/api/diagrams/:id/draft', 'edit'],
+    ['POST', '/api/diagrams/:id/undo', 'edit'], ['POST', '/api/diagrams/:id/redo', 'edit'], ['POST', '/api/diagrams/:id/layout', 'edit'],
+    ['POST', '/api/diagrams/:id/commit', 'version'], ['POST', '/api/diagrams/:id/restore', 'restore'],
+    ['POST', '/api/diagrams', 'create'], ['POST', '/api/diagrams/:id/duplicate', 'duplicate'],
+    ['PATCH', '/api/diagrams/:id', 'rename'], ['DELETE', '/api/diagrams/:id', 'delete']
+  ];
+  const activityKind = new Map(ACTIVITY.map(([m, u, k]) => [`${m} ${u}`, k]));
+  /** Nom d'un diagramme au moment de l'action (gardé même s'il est renommé ou supprimé ensuite). */
+  const diagramNameOf = id => id ? db.getDiagram(id)?.name || null : null;
+  const logActivity = (user, { diagramId = null, kind, via = 'web', name } = {}) => {
+    try { db.logActivity({ userId: user.id, userName: user.name, diagramId, diagramName: name ?? diagramNameOf(diagramId), kind, via }); }
+    catch (e) { app.log.warn(e, 'journal d\'activité'); }
+  };
+  app.addHook('preHandler', async req => {
+    // nom avant suppression / renommage
+    if (req.method === 'DELETE' || req.method === 'PATCH') req.activityName = diagramNameOf(req.params?.id);
+  });
+  app.addHook('onSend', async (req, reply, payload) => {
+    const kind = activityKind.get(`${req.method} ${req.routeOptions?.url}`);
+    if (!kind || !req.user || reply.statusCode >= 300) return payload;
+    let diagramId = req.params?.id || null, name;
+    if (kind === 'create') { try { diagramId = JSON.parse(payload).id; } catch { /* */ } }
+    if (kind === 'duplicate') { try { const c = JSON.parse(payload); name = `${diagramNameOf(req.params.id)} → ${c.name}`; } catch { /* */ } }
+    if (kind === 'delete' || kind === 'rename') name = kind === 'rename' ? `${req.activityName} → ${req.body?.name}` : req.activityName;
+    logActivity(req.user, { diagramId: kind === 'login' ? null : diagramId, kind, via: req.body?.via === 'claude' ? 'claude' : 'web', name });
+    return payload;
+  });
+  db.purgeActivity(400 * 86400e3);   // on garde un peu plus d'un an
+
+  /** Statistiques d'activité sur une période (jours), pour l'administration. */
+  app.get('/api/admin/activity', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const days = Math.min(400, Math.max(1, Number(req.query?.days) || 30));
+    const rows = db.activitySince(Date.now() - days * 86400e3);
+    const users = new Map(db.listUsers().map(u => [u.id, { id: u.id, name: u.name, email: u.email, role: u.role, status: u.status, views: 0, edits: 0, claude: 0, versions: 0, diagrams: new Set(), lastLogin: null, lastSeen: null }]));
+    for (const r of db.lastLogins()) if (users.has(r.user_id)) users.get(r.user_id).lastLogin = r.at;
+    for (const r of db.lastSeen()) if (users.has(r.user_id)) users.get(r.user_id).lastSeen = r.at;
+    const diagramsById = new Map(db.listDiagrams().map(d => [d.id, { id: d.id, name: d.name, views: 0, viewers: new Set(), edits: 0, editors: new Set(), claude: 0, versions: 0, lastEdit: null, lastEditBy: null }]));
+    for (const r of rows) {
+      const u = users.get(r.user_id), d = diagramsById.get(r.diagram_id);
+      if (r.kind === 'view') { if (u) { u.views++; u.diagrams.add(r.diagram_id); } if (d) { d.views++; d.viewers.add(r.user_name); } }
+      if (r.kind === 'edit' || r.kind === 'restore') {
+        if (u) { r.via === 'claude' ? u.claude++ : u.edits++; u.diagrams.add(r.diagram_id); }
+        if (d) { r.via === 'claude' ? d.claude++ : d.edits++; d.editors.add(r.user_name + (r.via === 'claude' ? ' (via Claude)' : '')); if (!d.lastEdit || r.last_at > d.lastEdit) { d.lastEdit = r.last_at; d.lastEditBy = r.user_name; } }
+      }
+      if (r.kind === 'version') { if (u) u.versions++; if (d) d.versions++; }
+    }
+    const online = hub.online().map(o => ({ ...o, diagram: diagramNameOf(o.diagramId) }));
+    return {
+      days,
+      online,
+      users: [...users.values()].map(u => ({ ...u, diagrams: u.diagrams.size })),
+      diagrams: [...diagramsById.values()].map(d => ({ ...d, viewers: [...d.viewers], editors: [...d.editors] })),
+      recent: rows.slice(0, 80).map(r => ({ at: r.last_at, start: r.at, user: r.user_name, diagram: r.diagram_name, diagramId: r.diagram_id, kind: r.kind, via: r.via, count: r.count }))
+    };
   });
 
   // ---------- invitations et administration des comptes (logique commune avec le connecteur MCP) ----------
@@ -165,6 +226,7 @@ export async function buildApp(config) {
     const r = accounts.acceptInvitation(req.params.token, req.body || {});
     if (r.error) return fail(reply, r.status, r.error);
     auth.issueSession(reply, req, r.user);
+    req.user = r.user;
     return reply.code(201).send({ user: r.user });
   });
 
@@ -201,7 +263,8 @@ export async function buildApp(config) {
   // ---------- diagrammes ----------
   app.get('/api/diagrams', async (req, reply) => {
     if (!requireUser(req, reply)) return;
-    return diagrams.list();
+    // avec qui a chaque diagramme ouvert en ce moment (pastilles de présence dans la liste)
+    return (await diagrams.list()).map(d => ({ ...d, viewers: hub.peopleOn(d.id).map(p => ({ id: p.id, name: p.name, editing: p.editing })) }));
   });
 
   app.post('/api/diagrams', async (req, reply) => {

@@ -19,6 +19,7 @@ import { createHistory } from './history.js';
 import { createChecks } from './checks.js';
 import { createApplier } from './aiops.js';
 import { createFocus } from './focus.js';
+import { avatarStack } from './avatars.js';
 import { connectLive } from './live.js';
 import { labelOverflow } from '../../shared/labelfit.js';
 
@@ -421,6 +422,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     finally { btn.disabled = false; }
   });
 
+  let presenceTimer = null;
   const expMenu = $('#expMenu', root);
   $('#exp', root).addEventListener('click', () => { expMenu.hidden = !expMenu.hidden; });
   const closeMenu = e => { if (!e.target.closest('.menu-wrap')) expMenu.hidden = true; };
@@ -494,10 +496,15 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
       return;
     }
     if (m.type === 'presence') {
-      const others = m.people.filter(p => p.id !== user.id).map(p => p.name);
+      // pastilles des autres personnes qui ont ce diagramme ouvert (comme Google Drive)
+      const others = m.people.filter(p => p.id !== user.id);
       const pr = $('#presence', root);
-      pr.textContent = others.length ? `👁 ${others.length > 1 ? others.length : others[0]}` : '';
-      pr.title = others.length ? `Ont aussi ouvert ce diagramme : ${others.join(', ')}` : '';
+      pr.innerHTML = avatarStack(others, { max: 4, size: 28 });
+      pr.title = others.length ? `Aussi sur ce diagramme : ${others.map(p => p.name).join(', ')}` : '';
+      // le badge « Claude agit » s'efface au bout d'une minute
+      clearTimeout(presenceTimer);
+      const next = Math.min(...others.filter(p => p.claudeAt).map(p => p.claudeAt + 60e3 - Date.now()).filter(t => t > 0));
+      if (Number.isFinite(next)) presenceTimer = setTimeout(() => { pr.innerHTML = avatarStack(others, { max: 4, size: 28 }); }, next + 50);
       return;
     }
     if (m.type === 'draft') {

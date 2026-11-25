@@ -255,3 +255,32 @@ test('invitation : lien à usage unique, mot de passe choisi par la personne, co
   assert.equal((await call('DELETE', `/api/invitations/${c.id}`, { cookie: adminCookie })).statusCode, 200);
   assert.equal((await call('GET', `/api/invite/${r2.token}`)).statusCode, 404, 'annulée : le lien ne marche plus');
 });
+
+test('activité : connexions, consultations, modifications regroupées par session, statistiques réservées à l\'administrateur', async () => {
+  const d = (await call('POST', '/api/diagrams', { cookie: aliceCookie, body: { name: 'Suivi activité' } })).json();
+  await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie });
+  await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie });   // même session : regroupée
+  await call('POST', `/api/diagrams/${d.id}/lock`, { cookie: aliceCookie, body: { holder: 'S' } });
+  const xml = (await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie })).json().xml;
+  await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: xml.replace('name="Début"', 'name="A"'), holder: 'S' } });
+  await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: xml.replace('name="Début"', 'name="B"'), holder: 'S', via: 'claude' } });
+  await call('POST', `/api/diagrams/${d.id}/commit`, { cookie: aliceCookie, body: { holder: 'S', message: 'v2' } });
+  await call('POST', `/api/diagrams/${d.id}/unlock`, { cookie: aliceCookie, body: { holder: 'S' } });
+
+  assert.equal((await call('GET', '/api/admin/activity', { cookie: aliceCookie })).statusCode, 403);
+  const a = (await call('GET', '/api/admin/activity?days=7', { cookie: adminCookie })).json();
+  const alice = a.users.find(u => u.email === 'alice@test.fr');
+  assert.ok(alice.lastLogin && alice.lastSeen, 'dernière connexion et activité');
+  const st = a.diagrams.find(x => x.id === d.id);
+  assert.equal(st.views, 1, 'trois ouvertures rapprochées = une consultation');
+  assert.equal(st.edits, 1);
+  assert.equal(st.claude, 1, 'modification via Claude comptée à part');
+  assert.deepEqual(st.viewers, ['Alice Martin']);
+  assert.ok(st.editors.includes('Alice Martin (via Claude)'));
+  assert.ok(a.recent.some(r => r.kind === 'create' && r.diagram === 'Suivi activité'));
+  assert.ok(a.recent.some(r => r.kind === 'view' && r.count >= 3), 'la session compte les ouvertures');
+  assert.ok(Array.isArray(a.online));
+  await call('DELETE', `/api/diagrams/${d.id}`, { cookie: adminCookie });
+  const b = (await call('GET', '/api/admin/activity', { cookie: adminCookie })).json();
+  assert.ok(b.recent.some(r => r.kind === 'delete' && r.diagram === 'Suivi activité'), 'le nom reste après suppression');
+});

@@ -29,6 +29,7 @@ export const api = {
   updateMe: fields => request('PATCH', '/api/me', fields),
   users: () => request('GET', '/api/users'),
   invitations: () => request('GET', '/api/invitations'),
+  activity: days => request('GET', `/api/admin/activity?days=${days}`),
   invite: (email, name) => request('POST', '/api/invitations', { email, name }),
   renewInvitation: id => request('POST', `/api/invitations/${id}/renew`, {}),
   deleteInvitation: id => request('DELETE', `/api/invitations/${id}`),

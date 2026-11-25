@@ -12,14 +12,18 @@ export function createHub({ log = console, build = 'dev' } = {}) {
   }
 
   function attach(socket, user) {
-    const c = { socket, user, diagramId: null, holder: null, editing: false, lastActive: Date.now() };
+    const c = { socket, user, diagramId: null, holder: null, editing: false, lastActive: Date.now(), since: Date.now(), claudeAt: 0 };
     clients.add(c);
     try { socket.send(JSON.stringify({ type: 'welcome', build })); } catch { /* fermé */ }
     socket.on('message', raw => {
       let m; try { m = JSON.parse(raw); } catch { return; }
       c.lastActive = Date.now();
-      if (m.type === 'hello') { c.diagramId = String(m.diagramId || ''); c.holder = String(m.holder || ''); presence(c.diagramId); }
-      if (m.type === 'state') { c.editing = !!m.editing; c.focused = !!m.focused; }
+      if (m.type === 'hello') { const prev = c.diagramId; c.diagramId = String(m.diagramId || ''); c.holder = String(m.holder || ''); c.since = Date.now(); if (prev && prev !== c.diagramId) presence(prev); presence(c.diagramId); }
+      if (m.type === 'state') {
+        const before = `${c.editing}|${c.focused}`;
+        c.editing = !!m.editing; c.focused = !!m.focused;
+        if (c.diagramId && before !== `${c.editing}|${c.focused}`) presence(c.diagramId);
+      }
       if (m.type === 'response' && waiting.has(m.reqId)) {
         const w = waiting.get(m.reqId);
         waiting.delete(m.reqId);
@@ -33,9 +37,31 @@ export function createHub({ log = console, build = 'dev' } = {}) {
 
   const viewers = diagramId => [...clients].filter(c => c.diagramId === diagramId);
 
+  // connexions muettes depuis plus de 70 s (onglet tué, réseau coupé, page en cache) : écartées
+  const sweep = setInterval(() => {
+    for (const c of [...clients]) if (Date.now() - c.lastActive > 70e3) {
+      clients.delete(c);
+      try { c.socket.terminate?.() ?? c.socket.close(); } catch { /* */ }
+      if (c.diagramId) presence(c.diagramId);
+    }
+  }, 15e3);
+  sweep.unref?.();
+
+  /**
+   * Qui a ce diagramme ouvert, une entrée par personne (plusieurs onglets fusionnés) : en train de
+   * modifier, onglet au premier plan, depuis quand, et dernière action de Claude pour elle.
+   */
+  function peopleOn(diagramId) {
+    const byUser = new Map();
+    for (const c of viewers(diagramId)) {
+      const p = byUser.get(c.user.id) || { id: c.user.id, name: c.user.name, editing: false, focused: false, since: c.since, claudeAt: 0 };
+      p.editing ||= c.editing; p.focused ||= c.focused !== false; p.since = Math.min(p.since, c.since); p.claudeAt = Math.max(p.claudeAt, c.claudeAt || 0);
+      byUser.set(c.user.id, p);
+    }
+    return [...byUser.values()];
+  }
   function presence(diagramId) {
-    const people = [...new Map(viewers(diagramId).map(c => [c.user.id, { id: c.user.id, name: c.user.name }])).values()];
-    broadcast(diagramId, { type: 'presence', people });
+    broadcast(diagramId, { type: 'presence', people: peopleOn(diagramId) });
   }
 
   function broadcast(diagramId, msg, { exceptHolder } = {}) {
@@ -54,6 +80,10 @@ export function createHub({ log = console, build = 'dev' } = {}) {
     const c = pick(diagramId, userId);
     if (!c) return Promise.resolve(null);
     const reqId = randomBytes(8).toString('hex');
+    // Claude agit pour cette personne : les autres le voient dans la présence
+    const first = !c.claudeAt || Date.now() - c.claudeAt > 60e3;
+    c.claudeAt = Date.now();
+    if (first) presence(diagramId);
     return new Promise(resolve => {
       const timer = setTimeout(() => { waiting.delete(reqId); resolve({ ok: false, error: 'La page n\'a pas répondu à temps.' }); }, timeoutMs);
       waiting.set(reqId, { resolve, timer });
@@ -65,6 +95,18 @@ export function createHub({ log = console, build = 'dev' } = {}) {
     attach, broadcast, request,
     isOpen: (diagramId, userId) => !!pick(diagramId, userId),
     openBy: diagramId => [...new Set(viewers(diagramId).map(c => c.user.name))],
-    close() { for (const c of clients) try { c.socket.close(); } catch { /* */ } clients.clear(); }
+    peopleOn,
+    /** Toutes les personnes connectées en temps réel, et le diagramme ouvert. */
+    online: () => {
+      const seen = new Map();
+      for (const c of clients) {
+        const k = `${c.user.id}|${c.diagramId || ''}`;
+        const o = seen.get(k) || { userId: c.user.id, name: c.user.name, diagramId: c.diagramId || null, editing: false, since: c.since };
+        o.editing ||= c.editing; o.since = Math.min(o.since, c.since);
+        seen.set(k, o);
+      }
+      return [...seen.values()];
+    },
+    close() { clearInterval(sweep); for (const c of clients) try { c.socket.close(); } catch { /* */ } clients.clear(); }
   };
 }

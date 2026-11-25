@@ -2,6 +2,7 @@ import './styles.css';
 import { api, ApiError, setUnauthorizedHandler } from './api.js';
 import { $, h, esc, fmtDate, toast, dialog } from './dom.js';
 import { openEditor } from './editor.js';
+import { avatarStack } from './avatars.js';
 
 const app = $('#app');
 let cfg = null;
@@ -237,6 +238,7 @@ async function renderLibrary() {
     list.innerHTML = shown.map(d => `<article class="lib-item">
       <a class="lib-link" data-link href="/d/${esc(d.id)}"><b>${esc(d.name)}</b>
         <span class="muted small">${esc(fmtDate(d.updatedAt))}${d.updatedBy ? ' · ' + esc(d.updatedBy) : ''} · <span class="mono">${esc(d.path)}</span></span></a>
+      ${avatarStack(d.viewers || [], { max: 3, size: 26, title: (d.viewers || []).length ? `Ouvert en ce moment par ${d.viewers.map(v => v.name).join(', ')}` : '' })}
       ${d.lock ? `<span class="pill warn">${esc(d.lock.author || 'Quelqu\'un')} modifie</span>` : ''}
       <button class="btn small ghost" data-act="rename" data-id="${esc(d.id)}">Renommer</button>
       <button class="btn small ghost" data-act="dup" data-id="${esc(d.id)}">Dupliquer</button>
@@ -245,6 +247,12 @@ async function renderLibrary() {
   };
   $('#q').addEventListener('input', draw);
   draw();
+  // qui a quel diagramme ouvert : rafraîchi toutes les 20 s tant que la liste est affichée
+  const poll = setInterval(async () => {
+    if (!document.body.contains($('#list'))) return;
+    try { items = await api.list(); draw(); } catch { /* hors ligne : on réessaiera */ }
+  }, 20e3);
+  closeCurrent = () => clearInterval(poll);
   $('#list').onclick = async e => {
     const b = e.target.closest('button[data-act]');
     if (!b) return;
@@ -267,6 +275,21 @@ async function renderAdmin() {
   document.title = 'Administration · Éditeur BPMN';
   app.innerHTML = `<div class="lib">
     ${header('Administration')}
+    <nav class="seg admin-tabs" role="tablist">
+      <button type="button" role="tab" aria-checked="true" data-at="accounts">Comptes</button>
+      <button type="button" role="tab" aria-checked="false" data-at="activity">Activité</button>
+      <button type="button" role="tab" aria-checked="false" data-at="git">Dépôt Git</button>
+    </nav>
+    <div data-pane="activity" hidden>
+      <section class="admin-sec">
+        <div class="act-head"><h2>Activité</h2>
+          <div class="seg small" role="tablist" id="actDays">
+            <button type="button" data-d="7" aria-checked="false">7 jours</button><button type="button" data-d="30" aria-checked="true">30 jours</button><button type="button" data-d="90" aria-checked="false">90 jours</button><button type="button" data-d="365" aria-checked="false">1 an</button>
+          </div></div>
+        <div id="activity"><p class="muted">Chargement…</p></div>
+      </section>
+    </div>
+    <div data-pane="accounts">
     <section class="admin-sec"><h2>Inviter quelqu'un</h2><p class="muted">Saisissez son e-mail : un lien d'invitation est créé, à lui transmettre vous-même (mail, messagerie…). En l'ouvrant, la personne choisit son mot de passe ; son identifiant sera cet e-mail. Le lien sert une seule fois et reste valable ${'7'} jours.</p>
       <form id="invite" class="invite-form" novalidate>
         <input class="field" id="invEmail" type="text" inputmode="email" autocapitalize="none" spellcheck="false" placeholder="prenom.nom@exemple.fr" aria-label="E-mail de la personne invitée">
@@ -277,7 +300,8 @@ async function renderAdmin() {
       <div id="invites" class="lib-list"></div>
     </section>
     <section class="admin-sec"><h2>Comptes</h2><p class="muted">Les nouveaux comptes attendent votre validation. Un compte actif voit et peut modifier tous les diagrammes.</p><div id="users" class="lib-list"><p class="muted">Chargement…</p></div></section>
-    <section class="admin-sec"><h2>Dépôt Git</h2><div id="git"><p class="muted">Chargement…</p></div></section>
+    </div>
+    <div data-pane="git" hidden><section class="admin-sec"><h2>Dépôt Git</h2><div id="git"><p class="muted">Chargement…</p></div></section></div>
   </div>`;
   bindHeader();
 
@@ -379,6 +403,66 @@ async function renderAdmin() {
       loadInvites();
     } catch (err) { toast(err.message, 'error'); }
   });
+  // ---------- onglets ----------
+  const showTab = t => {
+    app.querySelectorAll('[data-at]').forEach(b => b.setAttribute('aria-checked', String(b.dataset.at === t)));
+    app.querySelectorAll('[data-pane]').forEach(p => { p.hidden = p.dataset.pane !== t; });
+    if (t === 'activity') loadActivity();
+    history.replaceState(null, '', t === 'accounts' ? '/admin' : `/admin#${t}`);
+  };
+  app.querySelectorAll('[data-at]').forEach(b => b.addEventListener('click', () => showTab(b.dataset.at)));
+
+  // ---------- activité : qui consulte, qui modifie ----------
+  const KIND = { login: 'connexion', view: 'consultation', edit: 'modification', version: 'version enregistrée', restore: 'retour à une version', create: 'création', duplicate: 'duplication', rename: 'renommage', delete: 'suppression' };
+  let days = 30;
+  const ago = ms => {
+    if (!ms) return '—';
+    const m = Math.round((Date.now() - ms) / 60e3);
+    if (m < 1) return 'à l\'instant'; if (m < 60) return `il y a ${m} min`;
+    const h = Math.round(m / 60); if (h < 24) return `il y a ${h} h`;
+    const d = Math.round(h / 24); return d < 31 ? `il y a ${d} j` : fmtDate(ms);
+  };
+  const dur = (a, b) => { const m = Math.round((b - a) / 60e3); return m >= 2 ? ` · ${m < 60 ? `${m} min` : `${Math.floor(m / 60)} h ${String(m % 60).padStart(2, '0')}`}` : ''; };
+  async function loadActivity() {
+    const box = $('#activity');
+    let a;
+    try { a = await api.activity(days); } catch (e) { box.innerHTML = `<p class="error">${esc(e.message)}</p>`; return; }
+    const people = a.users.filter(u => u.status !== 'disabled' || u.views + u.edits + u.claude);
+    const byOnline = new Map();
+    for (const o of a.online) { if (!byOnline.has(o.userId)) byOnline.set(o.userId, { id: o.userId, name: o.name, where: [] }); byOnline.get(o.userId).where.push(o); }
+    const onlineList = [...byOnline.values()];
+    const totals = { views: people.reduce((n, u) => n + u.views, 0), edits: people.reduce((n, u) => n + u.edits, 0), claude: people.reduce((n, u) => n + u.claude, 0), versions: people.reduce((n, u) => n + u.versions, 0), active: people.filter(u => u.views + u.edits + u.claude).length };
+    box.innerHTML = `
+      <div class="kpis">
+        <div class="kpi"><b>${onlineList.length}</b><span>en ligne maintenant</span></div>
+        <div class="kpi"><b>${totals.active}</b><span>personnes actives</span></div>
+        <div class="kpi"><b>${totals.views}</b><span>consultations</span></div>
+        <div class="kpi"><b>${totals.edits}</b><span>sessions de modification</span></div>
+        <div class="kpi"><b>${totals.claude}</b><span>modifications via Claude</span></div>
+        <div class="kpi"><b>${totals.versions}</b><span>versions enregistrées</span></div>
+      </div>
+      <h3 class="small-title">En ligne maintenant</h3>
+      ${onlineList.length ? `<div class="online">${onlineList.map(p => `<div class="online-row">${avatarStack([{ id: p.id, name: p.name, editing: p.where.some(w => w.editing) }], { size: 30 })}<div><b>${esc(p.name)}</b><span class="muted small">${p.where.map(w => w.diagramId ? `${w.editing ? 'modifie' : 'consulte'} <a data-link href="/d/${esc(w.diagramId)}">${esc(w.diagram || w.diagramId)}</a> depuis ${esc(ago(w.since).replace('il y a ', ''))}` : 'sur la liste des diagrammes').join(' · ')}</span></div></div>`).join('')}</div>` : '<p class="muted small">Personne en ce moment.</p>'}
+      <h3 class="small-title">Par personne</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Personne</th><th>Dernière connexion</th><th>Dernière activité</th><th class="num">Diagrammes</th><th class="num">Consultations</th><th class="num">Modifications</th><th class="num">Via Claude</th><th class="num">Versions</th></tr></thead><tbody>
+        ${people.sort((x, y) => (y.lastSeen || 0) - (x.lastSeen || 0)).map(u => `<tr><td><span class="who">${avatarStack([{ id: u.id, name: u.name }], { size: 24 })}<span><b>${esc(u.name)}</b><span class="muted small">${esc(u.email)}${u.status !== 'active' ? ` · ${u.status === 'pending' ? 'en attente' : 'désactivé'}` : ''}</span></span></span></td><td>${esc(ago(u.lastLogin))}</td><td>${esc(ago(u.lastSeen))}</td><td class="num">${u.diagrams || ''}</td><td class="num">${u.views || ''}</td><td class="num">${u.edits || ''}</td><td class="num">${u.claude || ''}</td><td class="num">${u.versions || ''}</td></tr>`).join('')}
+      </tbody></table></div>
+      <h3 class="small-title">Par diagramme</h3>
+      <div class="tbl-wrap"><table class="tbl"><thead><tr><th>Diagramme</th><th>Consulté par</th><th>Modifié par</th><th>Dernière modification</th><th class="num">Consult.</th><th class="num">Modif.</th><th class="num">Versions</th></tr></thead><tbody>
+        ${a.diagrams.sort((x, y) => (y.lastEdit || 0) - (x.lastEdit || 0) || y.views - x.views).map(d => `<tr><td><a data-link href="/d/${esc(d.id)}">${esc(d.name)}</a></td><td class="small">${esc(d.viewers.join(', ')) || '<span class="muted">—</span>'}</td><td class="small">${esc(d.editors.join(', ')) || '<span class="muted">—</span>'}</td><td class="small">${d.lastEdit ? `${esc(ago(d.lastEdit))} · ${esc(d.lastEditBy)}` : '—'}</td><td class="num">${d.views || ''}</td><td class="num">${d.edits + d.claude || ''}</td><td class="num">${d.versions || ''}</td></tr>`).join('')}
+      </tbody></table></div>
+      <h3 class="small-title">Dernières actions</h3>
+      ${a.recent.length ? `<ul class="feed">${a.recent.map(r => `<li><span class="muted small feed-at">${esc(fmtDate(r.at))}</span> <b>${esc(r.user || '?')}</b> · ${esc(KIND[r.kind] || r.kind)}${r.via === 'claude' ? ' <span class="tag soft">via Claude</span>' : ''}${r.diagram ? ` · ${r.diagramId && r.kind !== 'delete' ? `<a data-link href="/d/${esc(r.diagramId)}">${esc(r.diagram)}</a>` : esc(r.diagram)}` : ''}<span class="muted small">${r.count > 1 ? ` · ${r.count} actions` : ''}${dur(r.start, r.at)}</span></li>`).join('')}</ul>` : '<p class="muted small">Aucune activité sur la période.</p>'}
+      <p class="muted small">Les consultations et modifications répétées sont regroupées par session (moins de 30 min entre deux actions). Activité enregistrée depuis la mise en service de cette page ; conservée environ un an.</p>`;
+  }
+  $('#actDays').addEventListener('click', e => {
+    const b = e.target.closest('[data-d]'); if (!b) return;
+    days = Number(b.dataset.d);
+    $('#actDays').querySelectorAll('[data-d]').forEach(x => x.setAttribute('aria-checked', String(x === b)));
+    loadActivity();
+  });
+  if (location.hash === '#activity' || location.hash === '#git') showTab(location.hash.slice(1));
+
   loadInvites().catch(e => { $('#invites').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
   loadUsers().catch(e => { $('#users').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
   loadGit().catch(e => { $('#git').innerHTML = `<p class="error">${esc(e.message)}</p>`; });

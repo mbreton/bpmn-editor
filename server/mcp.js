@@ -15,7 +15,7 @@ const text = t => ({ content: [{ type: 'text', text: t }] });
 const fail = t => ({ content: [{ type: 'text', text: t }], isError: true });
 const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', dateStyle: 'short', timeStyle: 'short' }) : '';
 
-export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, version = '1.0.0' }) {
+export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, logActivity = () => {}, version = '1.0.0' }) {
   const issuesText = (issues, { max = 15, levels = ['error', 'warn'] } = {}) => {
     const shown = issues.filter(i => levels.includes(i.level));
     if (!shown.length) return 'Aucun problème de cohérence.';
@@ -48,8 +48,10 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, v
 
     const find = idOrName => {
       const all = db.listDiagrams();
-      return all.find(d => d.id === idOrName) || all.find(d => d.name.toLowerCase() === String(idOrName).toLowerCase())
+      const d = all.find(d => d.id === idOrName) || all.find(d => d.name.toLowerCase() === String(idOrName).toLowerCase())
         || all.filter(d => d.name.toLowerCase().includes(String(idOrName).toLowerCase())).at(0) || null;
+      if (d) logActivity(user, { diagramId: d.id, kind: 'view', via: 'claude' });   // consultation par Claude (journal d'activité)
+      return d;
     };
     const guardLock = d => (d.lock && d.lock.userId !== user.id) ? `${d.lock.author} est en train de modifier « ${d.name} » : je ne peux pas y toucher pour l'instant.` : null;
     const notOpen = d => `« ${d.name} » n'est ouvert dans aucun de vos navigateurs. Ouvrez ${url(d.id)} pour que je puisse agir à l'écran.`;

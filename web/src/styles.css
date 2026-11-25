@@ -357,3 +357,39 @@ textarea.field { resize: vertical; line-height: 1.45; }
 .invite-row { display: flex; gap: 8px; }
 .invite-row .field { flex: 1; font-size: 13px; }
 .small-title { font-size: 14px; margin: 12px 0 6px; }
+
+/* pastilles de présence */
+.av-stack { display: inline-flex; align-items: center; vertical-align: middle; }
+.av { --sz: 28px; position: relative; display: inline-grid; place-items: center; width: var(--sz); height: var(--sz); border-radius: 50%;
+  background: var(--av, #888); color: #fff; font-size: calc(var(--sz) * .4); font-weight: 600; letter-spacing: .02em;
+  border: 2px solid var(--bg, #fff); margin-left: -6px; cursor: default; user-select: none; transition: opacity .2s; }
+.av:first-child { margin-left: 0; }
+.av.editing { box-shadow: 0 0 0 2px var(--av); }
+.av.away { opacity: .45; }
+.av.more { background: #e5e7eb; color: #374151; }
+.av-claude { position: absolute; right: -4px; bottom: -4px; width: 14px; height: 14px; border-radius: 50%; background: #d97757; color: #fff;
+  font-size: 9px; font-style: normal; display: grid; place-items: center; border: 1.5px solid var(--bg, #fff); }
+.presence { display: inline-flex; align-items: center; gap: 6px; }
+.lib-item .av-stack { margin-right: 6px; }
+
+/* administration : onglets et activité */
+.admin-tabs { margin: 8px 0 4px; max-width: 420px; }
+.act-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.act-head h2 { margin: 0; }
+.seg.small button { font-size: 13px; padding: 5px 10px; white-space: nowrap; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin: 14px 0; }
+.kpi { background: var(--panel); border-radius: 10px; padding: 10px 12px; display: flex; flex-direction: column; }
+.kpi b { font-size: 22px; font-variant-numeric: tabular-nums; }
+.kpi span { font-size: 12px; color: var(--muted, #667); }
+.online { display: grid; gap: 8px; }
+.online-row { display: flex; gap: 10px; align-items: center; }
+.online-row > div { display: flex; flex-direction: column; }
+.tbl-wrap { overflow-x: auto; }
+.tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tbl th { text-align: left; font-weight: 600; color: var(--muted, #667); font-size: 12px; padding: 6px 8px; border-bottom: 1px solid var(--line, #e5e7eb); white-space: nowrap; }
+.tbl td { padding: 7px 8px; border-bottom: 1px solid var(--line, #f0f0f0); vertical-align: middle; }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.who { display: inline-flex; gap: 8px; align-items: center; }
+.who > span:last-child { display: flex; flex-direction: column; }
+.feed { list-style: none; padding: 0; margin: 0; display: grid; gap: 4px; font-size: 13px; }
+.feed-at { display: inline-block; min-width: 110px; }

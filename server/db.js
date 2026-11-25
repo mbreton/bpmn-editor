@@ -99,6 +99,20 @@ export function openDb(file) {
       revoked       INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS oauth_tokens_user ON oauth_tokens(user_id);
+    CREATE TABLE IF NOT EXISTS activity (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id       TEXT,
+      user_name     TEXT,
+      diagram_id    TEXT,
+      diagram_name  TEXT,
+      kind          TEXT NOT NULL,
+      via           TEXT NOT NULL DEFAULT 'web',
+      at            INTEGER NOT NULL,
+      last_at       INTEGER NOT NULL,
+      count         INTEGER NOT NULL DEFAULT 1
+    );
+    CREATE INDEX IF NOT EXISTS activity_at ON activity(last_at);
+    CREATE INDEX IF NOT EXISTS activity_key ON activity(user_id, diagram_id, kind, via, last_at);
     CREATE TABLE IF NOT EXISTS invitations (
       id            TEXT PRIMARY KEY,
       token_hash    TEXT NOT NULL UNIQUE,
@@ -165,6 +179,26 @@ function wrap(db) {
       return this.userById(id);
     },
     deleteUser: id => q('DELETE FROM users WHERE id = ?').run(id).changes > 0,
+
+    // ---------- journal d'activité (statistiques d'administration) ----------
+    /**
+     * Note une action. Consultations et modifications répétées par la même personne sur le même
+     * diagramme sont regroupées en une « session » tant qu'il s'écoule moins de 30 min entre deux actions.
+     */
+    logActivity({ userId, userName, diagramId = null, diagramName = null, kind, via = 'web' }) {
+      const t = now();
+      if (['view', 'edit'].includes(kind)) {
+        const last = q('SELECT id FROM activity WHERE user_id = ? AND diagram_id IS ? AND kind = ? AND via = ? AND last_at > ? ORDER BY last_at DESC LIMIT 1')
+          .get(userId, diagramId, kind, via, t - 30 * 60e3);
+        if (last) { q('UPDATE activity SET last_at = ?, count = count + 1 WHERE id = ?').run(t, last.id); return; }
+      }
+      q('INSERT INTO activity(user_id, user_name, diagram_id, diagram_name, kind, via, at, last_at) VALUES(?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(userId, userName, diagramId, diagramName, kind, via, t, t);
+    },
+    purgeActivity: (olderThanMs) => q('DELETE FROM activity WHERE last_at < ?').run(now() - olderThanMs).changes,
+    activitySince: since => q('SELECT * FROM activity WHERE last_at >= ? ORDER BY last_at DESC').all(since),
+    lastLogins: () => q(`SELECT user_id, max(at) AS at FROM activity WHERE kind = 'login' GROUP BY user_id`).all(),
+    lastSeen: () => q('SELECT user_id, max(last_at) AS at FROM activity GROUP BY user_id').all(),
 
     // ---------- invitations (lien à usage unique ; seul le haché du jeton est stocké) ----------
     createInvitation({ email, name, tokenHash, createdBy, expiresAt }) {
