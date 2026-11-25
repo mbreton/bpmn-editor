@@ -5,7 +5,8 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { createAccounts } from './accounts.js';
 import { openDb } from './db.js';
 import { createAuth } from './auth.js';
 import { createGitStore, GitError } from './git.js';
@@ -32,7 +33,8 @@ export async function buildApp(config) {
   const indexFile = config.webRoot && join(config.webRoot, 'index.html');
   const build = indexFile && existsSync(indexFile) ? createHash('sha256').update(readFileSync(indexFile)).digest('hex').slice(0, 12) : 'dev';
   const hub = createHub({ log, build });
-  const mcp = createMcp({ db, diagrams, hub, checkDiagram, layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
+  const accounts = createAccounts({ db, auth });
+  const mcp = createMcp({ db, diagrams, hub, checkDiagram, accounts, layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
   await git.init();
@@ -133,96 +135,52 @@ export async function buildApp(config) {
     return db.updateUser(u.id, fields);
   });
 
-  // ---------- invitations : l'administrateur génère un lien, la personne choisit son mot de passe ----------
-  const INVITE_DAYS = 7;
-  const tokenHash = t => createHash('sha256').update(String(t)).digest('hex');
-  const newInviteToken = () => { const token = randomBytes(24).toString('base64url'); return { token, hash: tokenHash(token), expiresAt: Date.now() + INVITE_DAYS * 86400e3 }; };
-  const validEmail = e => typeof e === 'string' && EMAIL_RE.test(e.trim()) && e.length <= 200;
+  // ---------- invitations et administration des comptes (logique commune avec le connecteur MCP) ----------
+  const send = (reply, r, code = 200) => r.error ? fail(reply, r.status, r.error) : reply.code(code).send(r);
 
   app.get('/api/invitations', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
-    return db.listInvitations();
+    return accounts.listInvitations();
   });
-
   app.post('/api/invitations', async (req, reply) => {
     const u = requireAdmin(req, reply); if (!u) return;
-    const { email, name } = req.body || {};
-    if (!validEmail(email)) return fail(reply, 400, 'Adresse e-mail invalide.');
-    if (name !== undefined && name !== '' && !str(name, 80, 2)) return fail(reply, 400, 'Nom : 2 à 80 caractères.');
-    if (db.userAuthByEmail(email.trim())) return fail(reply, 409, 'Un compte existe déjà avec cette adresse.');
-    const t = newInviteToken();
-    const id = db.createInvitation({ email: email.trim(), name: name?.trim() || null, tokenHash: t.hash, createdBy: u.id, expiresAt: t.expiresAt });
-    return reply.code(201).send({ id, email: email.trim(), token: t.token, expiresAt: t.expiresAt });
+    const r = accounts.invite(u, req.body || {});
+    return r.error ? fail(reply, r.status, r.error) : reply.code(201).send(r.invitation);
   });
-
   app.post('/api/invitations/:id/renew', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
-    const inv = db.invitationById(req.params.id);
-    if (!inv || inv.used_at) return fail(reply, 404, 'Invitation introuvable ou déjà utilisée.');
-    const t = newInviteToken();
-    db.renewInvitation(inv.id, t.hash, t.expiresAt);
-    return { id: inv.id, email: inv.email, token: t.token, expiresAt: t.expiresAt };
+    const r = accounts.renewInvitation(req.params.id);
+    return r.error ? fail(reply, r.status, r.error) : r.invitation;
   });
-
   app.delete('/api/invitations/:id', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
-    return db.deleteInvitation(req.params.id) ? { ok: true } : fail(reply, 404, 'Invitation introuvable.');
+    return send(reply, accounts.cancelInvitation(req.params.id));
   });
-
-  /** Lien d'invitation : pour qui il est, s'il est encore valable (sans connexion). */
-  const openInvitation = token => {
-    const inv = typeof token === 'string' && token.length <= 100 ? db.invitationByToken(tokenHash(token)) : null;
-    if (!inv) return { status: 404, error: 'Ce lien d\'invitation n\'est pas valable. Demandez-en un nouveau à l\'administrateur.' };
-    if (inv.used_at) return { status: 410, error: 'Ce lien d\'invitation a déjà été utilisé : connectez-vous avec votre e-mail et votre mot de passe.' };
-    if (inv.expires_at < Date.now()) return { status: 410, error: 'Ce lien d\'invitation a expiré. Demandez-en un nouveau à l\'administrateur.' };
-    return { inv };
-  };
   app.get('/api/invite/:token', { config: { rateLimit: { max: 30, timeWindow: '10 minutes' } } }, async (req, reply) => {
-    const r = openInvitation(req.params.token);
+    const r = accounts.openInvitation(req.params.token);
     if (r.error) return fail(reply, r.status, r.error);
     return { email: r.inv.email, name: r.inv.name, expiresAt: r.inv.expires_at };
   });
   app.post('/api/invite/:token', { config: { rateLimit: { max: 10, timeWindow: '10 minutes' } } }, async (req, reply) => {
-    const r = openInvitation(req.params.token);
+    const r = accounts.acceptInvitation(req.params.token, req.body || {});
     if (r.error) return fail(reply, r.status, r.error);
-    const { name, password } = req.body || {};
-    if (!str(name, 80, 2)) return fail(reply, 400, 'Nom requis (2 à 80 caractères).');
-    if (typeof password !== 'string' || password.length < 8 || password.length > 200) return fail(reply, 400, 'Mot de passe : 8 caractères minimum.');
-    if (db.userAuthByEmail(r.inv.email)) return fail(reply, 409, 'Un compte existe déjà avec cette adresse : connectez-vous.');
-    const user = db.tx(() => {
-      if (!db.useInvitation(r.inv.id)) return null;
-      const created = db.createUser({ email: r.inv.email, name: name.trim(), passwordHash: auth.hashPassword(password), status: 'active' });
-      return r.inv.created_by ? db.updateUser(created.id, { approvedBy: r.inv.created_by }) : created;
-    });
-    if (!user) return fail(reply, 410, 'Ce lien d\'invitation a déjà été utilisé.');
-    auth.issueSession(reply, req, user);
-    return reply.code(201).send({ user });
+    auth.issueSession(reply, req, r.user);
+    return reply.code(201).send({ user: r.user });
   });
 
-  // ---------- administration des comptes ----------
   app.get('/api/users', async (req, reply) => {
     if (!requireAdmin(req, reply)) return;
-    return db.listUsers();
+    return accounts.listUsers();
   });
-
   app.patch('/api/users/:uid', async (req, reply) => {
     const admin = requireAdmin(req, reply); if (!admin) return;
-    const target = db.userById(req.params.uid);
-    if (!target) return fail(reply, 404, 'Compte introuvable.');
-    const { status, role } = req.body || {};
-    if (status !== undefined && !['active', 'disabled', 'pending'].includes(status)) return fail(reply, 400, 'Statut invalide.');
-    if (role !== undefined && !['user', 'admin'].includes(role)) return fail(reply, 400, 'Rôle invalide.');
-    if (target.id === admin.id && ((status && status !== 'active') || role === 'user')) return fail(reply, 400, 'Vous ne pouvez pas retirer vos propres droits.');
-    const fields = { status, role };
-    if (status === 'active' && target.status === 'pending') fields.approvedBy = admin.id;
-    return db.updateUser(target.id, fields);
+    const r = accounts.updateUser(admin, req.params.uid, req.body || {});
+    return r.error ? fail(reply, r.status, r.error) : r.user;
   });
-
   app.delete('/api/users/:uid', async (req, reply) => {
     const admin = requireAdmin(req, reply); if (!admin) return;
-    if (req.params.uid === admin.id) return fail(reply, 400, 'Vous ne pouvez pas supprimer votre propre compte.');
-    if (!db.deleteUser(req.params.uid)) return fail(reply, 404, 'Compte introuvable.');
-    return { ok: true };
+    const r = accounts.deleteUser(admin, req.params.uid);
+    return r.error ? fail(reply, r.status, r.error) : { ok: true };
   });
 
   // ---------- dépôt Git ----------

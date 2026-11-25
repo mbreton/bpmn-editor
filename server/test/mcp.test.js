@@ -112,7 +112,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   client = new Client({ name: 'test', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
   const names = (await client.listTools()).tools.map(t => t.name).sort();
-  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'duplicate_diagram', 'explore', 'get_diagram', 'history', 'list_diagrams', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'view_diagram']);
+  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'delete_user', 'duplicate_diagram', 'explore', 'get_diagram', 'history', 'invite_user', 'list_diagrams', 'list_users', 'manage_invitation', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'update_user', 'view_diagram'], 'compte administrateur : outils d\'administration présents');
   const call = async (name, args) => (await client.callTool({ name, arguments: args }));
   const txt = r => r.content.map(c => c.text || '').join('\n');
 
@@ -177,6 +177,61 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   assert.match(txt(lay), /Disposition recalculée en \d+ ms/);
   assert.ok(browser.received.some(m => m.type === 'draft' && m.label === 'Réorganisation automatique'));
   assert.match(txt(await call('undo', { diagram: diagramId })), /Annulé : Réorganisation automatique/);
+});
+
+/** Jeton OAuth pour le compte connecté avec ce cookie (même parcours que Claude). */
+async function tokenFor(userCookie) {
+  const h = (m, p, o = {}) => http(m, p, { ...o, headers: { ...(o.headers || {}), cookie: userCookie } });
+  const reg = await (await h('POST', '/oauth/register', { body: { redirect_uris: [REDIRECT], client_name: 'Claude', token_endpoint_auth_method: 'none' } })).json();
+  const verifier = randomBytes(32).toString('base64url');
+  const qs = new URLSearchParams({ response_type: 'code', client_id: reg.client_id, redirect_uri: REDIRECT, code_challenge: createHash('sha256').update(verifier).digest('base64url'), code_challenge_method: 'S256', scope: 'diagrams', resource: `${base}/mcp` });
+  const tx = /name="tx" value="([^"]+)"/.exec(await (await h('GET', `/oauth/authorize?${qs}`)).text())[1];
+  const code = new URL((await h('POST', '/oauth/authorize', { form: { tx, decision: 'allow' } })).headers.get('location')).searchParams.get('code');
+  return (await (await h('POST', '/oauth/token', { form: { grant_type: 'authorization_code', code, redirect_uri: REDIRECT, client_id: reg.client_id, code_verifier: verifier } })).json()).access_token;
+}
+
+test('MCP : administration des comptes (invitation, rôle, suppression), réservée aux administrateurs', async () => {
+  const c = new Client({ name: 'test-admin', version: '1.0.0' });
+  await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
+  const txt = async (name, args) => (await c.callTool({ name, arguments: args })).content.map(x => x.text || '').join('\n');
+
+  assert.match(await txt('list_users', {}), /Mathieu <mathieu@test\.fr> · administrateur · actif · vous/);
+  assert.match(await txt('invite_user', { email: 'pas-un-mail' }), /invalide/);
+  const inv = await txt('invite_user', { email: 'zoe@test.fr', name: 'Zoé' });
+  const link = /(http\S+\/invite\/[\w-]+)/.exec(inv)?.[1];
+  assert.ok(link?.startsWith(base), 'lien d\'invitation complet : ' + inv);
+  assert.match(await txt('list_users', {}), /zoe@test\.fr \(Zoé\) · valable jusqu'au/);
+  // la personne accepte avec le lien donné par le connecteur
+  const token = link.split('/invite/')[1];
+  const acc = await http('POST', `/api/invite/${token}`, { body: { name: 'Zoé Martin', password: 'motdepasse-zoe' }, headers: { cookie: '' } });
+  assert.equal(acc.status, 201);
+  const zoeCookie = acc.headers.get('set-cookie').split(';')[0];
+
+  assert.match(await txt('update_user', { user: 'mathieu@test.fr', role: 'user' }), /propres droits/, 'pas de retrait de ses propres droits');
+  assert.match(await txt('update_user', { user: 'Zoé Martin', role: 'admin' }), /Zoé Martin <zoe@test\.fr> : administrateur, actif/);
+  assert.match(await txt('update_user', { user: 'zoe@test.fr', role: 'user' }), /utilisateur, actif/);
+  assert.match(await txt('update_user', { user: 'inconnu@test.fr', status: 'disabled' }), /introuvable/);
+
+  // un compte non administrateur ne voit pas ces outils
+  const zt = await tokenFor(zoeCookie);
+  const zc = new Client({ name: 'test-zoe', version: '1.0.0' });
+  await zc.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${zt}` } } }));
+  const zNames = (await zc.listTools()).tools.map(t => t.name);
+  assert.ok(zNames.includes('list_diagrams') && !zNames.some(n => ['list_users', 'invite_user', 'update_user', 'delete_user', 'manage_invitation'].includes(n)), 'utilisateur : pas d\'outils d\'administration');
+  await zc.close();
+
+  // suppression : rien sans confirmation explicite
+  assert.match(await txt('delete_user', { user: 'zoe@test.fr', confirm: false }), /Rien n'a été supprimé/);
+  assert.match(await txt('list_users', {}), /zoe@test\.fr/);
+  assert.match(await txt('delete_user', { user: 'zoe@test.fr', confirm: true }), /supprimé/);
+  assert.doesNotMatch(await txt('list_users', {}), /zoe@test\.fr/);
+  // invitation renouvelée puis annulée
+  await txt('invite_user', { email: 'yann@test.fr' });
+  const renewed = await txt('manage_invitation', { invitation: 'yann@test.fr', action: 'renew' });
+  assert.match(renewed, /Nouveau lien pour yann@test\.fr/);
+  assert.match(await txt('manage_invitation', { invitation: 'yann@test.fr', action: 'cancel' }), /annulée/);
+  assert.equal((await http('GET', `/api/invite/${/\/invite\/([\w-]+)/.exec(renewed)[1]}`)).status, 404);
+  await c.close();
 });
 
 test('MCP : accès révoqué', async () => {

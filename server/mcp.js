@@ -15,7 +15,7 @@ const text = t => ({ content: [{ type: 'text', text: t }] });
 const fail = t => ({ content: [{ type: 'text', text: t }], isError: true });
 const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', dateStyle: 'short', timeStyle: 'short' }) : '';
 
-export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '1.0.0' }) {
+export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, version = '1.0.0' }) {
   const issuesText = (issues, { max = 15, levels = ['error', 'warn'] } = {}) => {
     const shown = issues.filter(i => levels.includes(i.level));
     if (!shown.length) return 'Aucun problème de cohérence.';
@@ -296,6 +296,88 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       const c = await diagrams.duplicate(d.id, { name, user });
       return text(`Copie « ${c.name} » créée [id ${c.id}] : ${url(c.id)}`);
     });
+
+    // ---------- administration des comptes : seulement pour un compte administrateur ----------
+    if (accounts && db.userById(user.id)?.role === 'admin') {
+      const STATUS = { pending: 'en attente de validation', active: 'actif', disabled: 'désactivé' };
+      /** Revérifie le rôle à chaque appel (il a pu être retiré depuis l'ouverture de la session). */
+      const admin = () => { const u = db.userById(user.id); return u?.role === 'admin' && u.status === 'active' ? u : null; };
+      const notAdmin = () => text('Votre compte n\'a plus les droits d\'administration.');
+      const findUser = ref => {
+        const all = db.listUsers(), r = String(ref || '').trim().toLowerCase();
+        return all.find(u => u.id === ref) || all.find(u => u.email.toLowerCase() === r) || all.find(u => u.name.toLowerCase() === r) || null;
+      };
+      const findInvite = ref => { const all = db.listInvitations(), r = String(ref || '').trim().toLowerCase(); return all.find(i => i.id === ref) || all.find(i => i.email.toLowerCase() === r) || null; };
+      const fmtDay = ms => new Date(ms).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long', year: 'numeric' });
+      const linkOf = inv => `${baseUrl}/invite/${inv.token}`;
+
+      server.registerTool('list_users', {
+        title: 'Lister les comptes',
+        description: 'Administration : comptes (nom, e-mail, rôle, statut) et invitations en attente.',
+        inputSchema: {}
+      }, async () => {
+        if (!admin()) return notAdmin();
+        const users = accounts.listUsers();
+        const invites = accounts.listInvitations();
+        return text([
+          `Comptes (${users.length}) :`,
+          ...users.map(u => `- ${u.name} <${u.email}> · ${u.role === 'admin' ? 'administrateur' : 'utilisateur'} · ${STATUS[u.status]}${u.id === user.id ? ' · vous' : ''} [id ${u.id}]`),
+          invites.length ? `Invitations en attente (${invites.length}) :` : 'Aucune invitation en attente.',
+          ...invites.map(i => `- ${i.email}${i.name ? ` (${i.name})` : ''} · ${i.expired ? 'lien expiré' : `valable jusqu'au ${fmtDay(i.expiresAt)}`} [id ${i.id}]`)
+        ].join('\n'));
+      });
+
+      server.registerTool('invite_user', {
+        title: 'Inviter quelqu\'un',
+        description: `Administration : crée un lien d'invitation à usage unique (${7} jours) pour un e-mail. La personne choisit son mot de passe en l'ouvrant ; son identifiant sera cet e-mail. Donnez le lien à l'utilisateur pour qu'il le transmette lui-même : il n'est affiché qu'une fois. À faire seulement quand l'utilisateur le demande.`,
+        inputSchema: { email: z.string().max(200), name: z.string().max(80).optional().describe('Nom affiché proposé (facultatif)') }
+      }, async ({ email, name }) => {
+        const a = admin(); if (!a) return notAdmin();
+        const r = accounts.invite(a, { email, name });
+        if (r.error) return text(r.error);
+        return text(`Invitation créée pour ${r.invitation.email}, valable jusqu'au ${fmtDay(r.invitation.expiresAt)} :\n${linkOf(r.invitation)}\n(Lien à usage unique, affiché une seule fois ; une nouvelle invitation pour la même adresse annule celle-ci.)`);
+      });
+
+      server.registerTool('manage_invitation', {
+        title: 'Renouveler ou annuler une invitation',
+        description: 'Administration : "renew" crée un nouveau lien (l\'ancien ne marche plus), "cancel" annule l\'invitation. invitation = e-mail ou identifiant.',
+        inputSchema: { invitation: z.string(), action: z.enum(['renew', 'cancel']) }
+      }, async ({ invitation, action }) => {
+        if (!admin()) return notAdmin();
+        const inv = findInvite(invitation);
+        if (!inv) return text(`Aucune invitation en attente pour « ${invitation} ».`);
+        if (action === 'cancel') { const r = accounts.cancelInvitation(inv.id); return text(r.error || `Invitation de ${inv.email} annulée : son lien ne fonctionne plus.`); }
+        const r = accounts.renewInvitation(inv.id);
+        return text(r.error || `Nouveau lien pour ${inv.email}, valable jusqu'au ${fmtDay(r.invitation.expiresAt)} :\n${linkOf(r.invitation)}`);
+      });
+
+      server.registerTool('update_user', {
+        title: 'Modifier un compte',
+        description: 'Administration : valider (status "active"), désactiver ("disabled") ou réactiver un compte ; rendre administrateur (role "admin") ou retirer ce rôle ("user"). user = e-mail, nom ou identifiant. À faire seulement quand l\'utilisateur le demande.',
+        inputSchema: { user: z.string(), status: z.enum(['active', 'disabled']).optional(), role: z.enum(['user', 'admin']).optional() }
+      }, async ({ user: ref, status, role }) => {
+        const a = admin(); if (!a) return notAdmin();
+        if (!status && !role) return text('Indiquez status ou role.');
+        const t = findUser(ref);
+        if (!t) return text(`Compte « ${ref} » introuvable (voir list_users).`);
+        const r = accounts.updateUser(a, t.id, { status, role });
+        if (r.error) return text(r.error);
+        return text(`${r.user.name} <${r.user.email}> : ${r.user.role === 'admin' ? 'administrateur' : 'utilisateur'}, ${STATUS[r.user.status]}.`);
+      });
+
+      server.registerTool('delete_user', {
+        title: 'Supprimer un compte',
+        description: 'Administration : supprime un compte (ses contributions restent dans l\'historique Git). Irréversible : ne l\'appelez qu\'après que l\'utilisateur a explicitement confirmé, en lui ayant rappelé le nom et l\'e-mail du compte, et passez alors confirm: true.',
+        inputSchema: { user: z.string(), confirm: z.boolean().describe('true seulement après confirmation explicite de l\'utilisateur') }
+      }, async ({ user: ref, confirm }) => {
+        const a = admin(); if (!a) return notAdmin();
+        const t = findUser(ref);
+        if (!t) return text(`Compte « ${ref} » introuvable (voir list_users).`);
+        if (confirm !== true) return text(`Rien n'a été supprimé. Demandez d'abord confirmation : supprimer ${t.name} <${t.email}> ? Puis rappelez delete_user avec confirm: true.`);
+        const r = accounts.deleteUser(a, t.id);
+        return text(r.error || `Compte de ${t.name} <${t.email}> supprimé. Ses contributions restent dans l'historique Git.`);
+      });
+    }
 
     return server;
   }
