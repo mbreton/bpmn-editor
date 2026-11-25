@@ -29,6 +29,29 @@ export function createApplier(modeler) {
   const autoPlace = modeler.get('autoPlace');
   const spaceTool = modeler.get('spaceTool');
   const commandStack = modeler.get('commandStack');
+  const docking = modeler.get('connectionDocking');
+  const LAYOUTS = ['h:v', 'v:h', 'h:h', 'v:v'];
+  const layoutHint = route => {
+    if (!route) return undefined;
+    if (!LAYOUTS.includes(route)) throw new OpError(`tracé « ${route} » inconnu (h:v, v:h, h:h ou v:v)`);
+    return { preferredLayouts: [route] };
+  };
+  /** Trace un flux par des points de passage (coudes), extrémités calées sur le bord des éléments. */
+  function routeVia(c, via) {
+    const pts = via.map(p => {
+      if (!Number.isFinite(p?.x) || !Number.isFinite(p?.y)) throw new OpError('chaque point de passage doit avoir x et y');
+      return { x: Math.round(p.x), y: Math.round(p.y) };
+    });
+    const mid = e => ({ x: Math.round(e.x + e.width / 2), y: Math.round(e.y + e.height / 2) });
+    // segments orthogonaux : l'extrémité est alignée sur le premier / dernier point de passage
+    const s = mid(c.source), t = mid(c.target);
+    const first = pts[0], last = pts[pts.length - 1];
+    const start = Math.abs(first.x - s.x) < Math.abs(first.y - s.y) ? { x: first.x, y: s.y } : { x: s.x, y: first.y };
+    const end = Math.abs(last.x - t.x) < Math.abs(last.y - t.y) ? { x: last.x, y: t.y } : { x: t.x, y: last.y };
+    const raw = [start, ...pts, end];
+    const cropped = docking.getCroppedWaypoints({ ...c, waypoints: raw }, c.source, c.target);
+    modeling.updateWaypoints(c, cropped);
+  }
 
   const refs = new Map(); // ref proposé par Claude → id réel
 
@@ -268,9 +291,10 @@ export function createApplier(modeler) {
 
     connect(op) {
       const a = get(op.from, 'source'), b = get(op.to, 'cible');
-      const c = modeling.connect(a, b);
+      const c = modeling.connect(a, b, undefined, layoutHint(op.route));
       if (!c) throw new OpError('liaison impossible entre ces éléments');
       if (op.ref) refs.set(op.ref, c.id);
+      if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
       if (op.name) modeling.updateLabel(c, op.name);
       if (op.condition) modeling.updateProperties(c, { conditionExpression: expr(op.condition) });
     },
@@ -285,6 +309,15 @@ export function createApplier(modeler) {
     },
 
     delete(op) { modeling.removeElements([get(op.id)]); },
+
+    /** Retrace un flux existant : forme du tracé (route) ou points de passage (via). */
+    reroute(op) {
+      const c = get(op.id);
+      if (!c.waypoints) throw new OpError(`« ${op.id} » n'est pas un flux`);
+      if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
+      else if (op.route) modeling.layoutConnection(c, layoutHint(op.route));
+      else throw new OpError('indiquez route (h:v, v:h, h:h, v:v) ou via (points de passage)');
+    },
 
     /**
      * Déplace un élément : à côté d'un autre (next_to + side), à une position (x, y = centre), ou d'un
