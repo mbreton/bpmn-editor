@@ -31,6 +31,7 @@ export function createApplier(modeler) {
   const spaceTool = modeler.get('spaceTool');
   const commandStack = modeler.get('commandStack');
   const docking = modeler.get('connectionDocking');
+  const canvas = modeler.get('canvas');
   const LAYOUTS = ['h:v', 'v:h', 'h:h', 'v:v'];
   /**
    * Forme de tracé imposée, calculée ici plutôt que par le « réparateur » de bpmn-js (qui conserve
@@ -68,20 +69,84 @@ export function createApplier(modeler) {
     return hits;
   }
 
-  /** Essaie des tracés alternatifs pour un flux qui traverse des éléments ; garde le premier sans traversée. */
-  function untangle(c) {
-    if (!crossedBy(c).length) return false;
-    const keep = c.waypoints.map(p => ({ x: p.x, y: p.y }));
-    const tries = [() => loopBelowIfBackward(c), ...LAYOUTS.map(r => () => routeShape(c, r)),
-      ...['right', 'bottom', 'top', 'left'].map(sd => () => routeVia(c, viaFromSide(c, sd)))];
-    for (const t of tries) {
-      try { t(); } catch { continue; }
-      const sideClash = is(c.source, 'bpmn:Gateway') && (c.source.outgoing || []).some(o => o !== c && o.waypoints?.length && exitSide(o) === exitSide(c));
-      if (!crossedBy(c).length && !sideClash) return true;
+  // ---------- coût d'un tracé : traverser un élément >> chevaucher un autre flux > le croiser ----------
+  const segsOf = c => c.waypoints.slice(1).map((q, i) => [c.waypoints[i], q]);
+  const horiz = ([p, q]) => Math.abs(p.y - q.y) < 1, vert = ([p, q]) => Math.abs(p.x - q.x) < 1;
+  /** Longueur commune de deux segments superposés (même ligne), 0 sinon. */
+  function overlapLen(a, b) {
+    if (horiz(a) && horiz(b) && Math.abs(a[0].y - b[0].y) < 4) {
+      const lo = Math.max(Math.min(a[0].x, a[1].x), Math.min(b[0].x, b[1].x)), hi = Math.min(Math.max(a[0].x, a[1].x), Math.max(b[0].x, b[1].x));
+      return Math.max(0, hi - lo);
     }
-    modeling.updateWaypoints(c, keep);
-    return false;
+    if (vert(a) && vert(b) && Math.abs(a[0].x - b[0].x) < 4) {
+      const lo = Math.max(Math.min(a[0].y, a[1].y), Math.min(b[0].y, b[1].y)), hi = Math.min(Math.max(a[0].y, a[1].y), Math.max(b[0].y, b[1].y));
+      return Math.max(0, hi - lo);
+    }
+    return 0;
   }
+  /** Croisement franc (un horizontal et un vertical qui se coupent hors de leurs extrémités). */
+  function crosses(a, b) {
+    const [h, v] = horiz(a) && vert(b) ? [a, b] : horiz(b) && vert(a) ? [b, a] : [null, null];
+    if (!h) return false;
+    const x = v[0].x, y = h[0].y;
+    const inH = x > Math.min(h[0].x, h[1].x) + 2 && x < Math.max(h[0].x, h[1].x) - 2;
+    const inV = y > Math.min(v[0].y, v[1].y) + 2 && y < Math.max(v[0].y, v[1].y) - 2;
+    return inH && inV;
+  }
+  /** Superpositions et croisements avec les autres flux (les flux qui partagent une extrémité peuvent se rejoindre près d'elle). */
+  function flowConflicts(c) {
+    let overlap = 0, cross = 0;
+    const mine = segsOf(c);
+    for (const o of registry.filter(e => e.waypoints && e !== c && !is(e, 'bpmn:Association') && e.waypoints.length > 1)) {
+      const shared = [c.source, c.target].filter(x => x === o.source || x === o.target);
+      // longueur totale superposée (tous segments confondus), moins une tolérance de convergence
+      // de 30 px par élément commun
+      let total = 0;
+      for (const a of mine) for (const b of segsOf(o)) {
+        const len = overlapLen(a, b);
+        if (len) total += len;
+        else if (crosses(a, b)) cross++;
+      }
+      if (total - (shared.length === 1 ? 30 : 0) > 8) overlap++;   // aller-retour entre les deux mêmes éléments : aucune tolérance
+    }
+    return { overlap, cross };
+  }
+  function routeCost(c) {
+    const len = segsOf(c).reduce((n, [p, q]) => n + Math.abs(p.x - q.x) + Math.abs(p.y - q.y), 0);
+    const { overlap, cross } = flowConflicts(c);
+    const sideClash = is(c.source, 'bpmn:Gateway') && (c.source.outgoing || []).some(o => o !== c && o.waypoints?.length && exitSide(o) === exitSide(c));
+    return crossedBy(c).length * 1000 + (sideClash ? 600 : 0) + overlap * 300 + cross * 40 + (c.waypoints.length - 2) * 5 + len / 50;
+  }
+
+  /**
+   * Cherche le meilleur tracé pour un flux : ne traverse aucun élément, ne se superpose à aucun autre
+   * flux, en croise le moins possible, reste court. Garde l'actuel s'il n'y a pas mieux.
+   */
+  function improveRoute(c, { force = false } = {}) {
+    if (!c.waypoints) return false;
+    const keep = c.waypoints.map(p => ({ x: p.x, y: p.y }));
+    const current = force ? Infinity : routeCost(c);
+    if (!force && current < 1) return false;
+    const vias = [];
+    const backward = c.target.x + c.target.width < c.source.x;
+    if (backward) for (const side of ['below', 'above']) for (const extra of [0, 15, 30, 45, 60]) { const v = loopVia(c, side, extra); if (v) vias.push(v); }
+    const sc = { x: c.source.x + c.source.width / 2, y: c.source.y + c.source.height / 2 }, tc = { x: c.target.x + c.target.width / 2, y: c.target.y + c.target.height / 2 };
+    vias.push([{ x: tc.x, y: sc.y }], [{ x: sc.x, y: tc.y }], [{ x: (sc.x + tc.x) / 2, y: sc.y }, { x: (sc.x + tc.x) / 2, y: tc.y }], [{ x: sc.x, y: (sc.y + tc.y) / 2 }, { x: tc.x, y: (sc.y + tc.y) / 2 }]);
+    for (const sd of ['right', 'bottom', 'top', 'left']) vias.push(viaFromSide(c, sd));
+    // contournements décalés (couloirs libres au-dessus / au-dessous de l'élément traversé)
+    for (const dy of [-60, -40, 40, 60]) vias.push([{ x: sc.x + Math.sign(tc.x - sc.x || 1) * (c.source.width / 2 + 20), y: sc.y }, { x: sc.x + Math.sign(tc.x - sc.x || 1) * (c.source.width / 2 + 20), y: tc.y + dy }, { x: tc.x - Math.sign(tc.x - sc.x || 1) * (c.target.width / 2 + 20), y: tc.y + dy }, { x: tc.x - Math.sign(tc.x - sc.x || 1) * (c.target.width / 2 + 20), y: tc.y }]);
+    let best = { cost: current, pts: keep };
+    for (const v of vias) {
+      try { routeVia(c, v); } catch { continue; }
+      const cost = routeCost(c);
+      if (cost < best.cost - 0.5) best = { cost, pts: c.waypoints.map(p => ({ x: p.x, y: p.y })) };
+    }
+    if (best.pts === keep) { if (!sameWaypoints(keep, c.waypoints)) modeling.updateWaypoints(c, keep); return false; }
+    if (!sameWaypoints(best.pts, c.waypoints)) modeling.updateWaypoints(c, best.pts);
+    return !sameWaypoints(best.pts, keep);
+  }
+  const untangle = c => improveRoute(c);
+
 
   // ---------- libellés qui se chevauchent ----------
   function labelClashes(lbl) {
@@ -192,44 +257,47 @@ export function createApplier(modeler) {
    * Flux qui revient en arrière (cible à gauche de la source) : le tracé automatique part à la
    * verticale et traverse la ligne principale. On le fait passer sous les éléments qu'il enjambe.
    */
+  /** Points de passage d'un retour en arrière par-dessous (side below) ou par-dessus, décalé de extra px. */
+  function loopVia(c, side, extra = 0) {
+    const s = c.source, t = c.target;
+    const parent = c.parent;
+    const between = registry.filter(e => e.parent === parent && !e.waypoints && e.type !== 'label' && !isContainerShape(e)
+      && e !== s && e !== t && e.x < s.x + s.width && e.x + e.width > t.x);
+    const labelsNear = registry.filter(e => e.type === 'label' && e.width && (between.includes(e.labelTarget) || between.includes(e.labelTarget?.host)));
+    const all = [...between, ...labelsNear];
+    const area = parent && isContainerShape(parent) ? parent : null;
+    const obstacles = [...between, ...registry.filter(e => e.type === 'label' && e.width && (e.labelTarget?.parent === parent || e.labelTarget?.host?.parent === parent))]
+      .filter(e => e !== s && e !== t && e.labelTarget !== s && e.labelTarget !== t);
+    let y = side === 'below'
+      ? Math.max(s.y + s.height, t.y + t.height, ...all.map(e => e.y + e.height)) + 25 + extra
+      : Math.min(s.y, t.y, ...all.map(e => e.y)) - 25 - extra;
+    if (area) y = Math.max(area.y + 30, Math.min(y, area.y + area.height - 12));
+    const pick = el => {
+      const edge = side === 'below' ? el.y + el.height : el.y;
+      const onEdge = (el.attachers || []).filter(a => Math.abs(a.y + a.height / 2 - edge) < 4);
+      const cands = [];
+      for (let f = 0.5, k = 0; k < 17; k++) { cands.push(Math.round(el.x + el.width * f)); f = 0.5 + (k % 2 ? 1 : -1) * Math.ceil((k + 1) / 2) * 0.05; }
+      return cands.find(x => x > el.x + 4 && x < el.x + el.width - 4
+        && onEdge.every(a => Math.abs(a.x + a.width / 2 - x) > a.width / 2 + 8)
+        && !obstacles.some(o => segmentHits({ x, y: edge + (side === 'below' ? 1 : -1) }, { x, y }, inflate(boxOf(o), 4))));
+    };
+    const sx = pick(s), tx = pick(t);
+    if (sx == null || tx == null) return null;
+    if (obstacles.some(o => segmentHits({ x: sx, y }, { x: tx, y }, inflate(boxOf(o), 2)))) return null;
+    return [{ x: sx, y }, { x: tx, y }];
+  }
+
+  /**
+   * Flux qui revient en arrière (cible à gauche de la source) : le tracé automatique part à la
+   * verticale et longe la ligne principale. On choisit le meilleur contournement (dessous ou dessus).
+   */
   function loopBelowIfBackward(c) {
     if (!is(c, 'bpmn:SequenceFlow')) return;
     const s = c.source, t = c.target;
     if (!(t.x + t.width < s.x)) return;
-    const parent = c.parent;
-    const between = registry.filter(e => e.parent === parent && !e.waypoints && e.type !== 'label' && !isContainerShape(e)
-      && e !== s && e !== t && e.x < s.x + s.width && e.x + e.width > t.x);
-    const labelsBelow = registry.filter(e => e.type === 'label' && e.labelTarget && between.includes(e.labelTarget));
-    const attLabels = registry.filter(e => e.type === 'label' && e.labelTarget?.host && between.includes(e.labelTarget.host));
-    const area = parent && isContainerShape(parent) ? parent : null;
-    const all = [...between, ...labelsBelow, ...attLabels];
-    const obstacles = [...between, ...registry.filter(e => e.type === 'label' && e.width && (e.labelTarget?.parent === parent || e.labelTarget?.host?.parent === parent))]
-      .filter(e => e !== s && e !== t && e.labelTarget !== s && e.labelTarget !== t);
-    // sous les éléments enjambés, sinon au-dessus ; sortie et arrivée à l'écart des événements de
-    // bordure, sans que la descente (ou la montée) traverse quoi que ce soit
-    for (const side of ['below', 'above']) {
-      let y = side === 'below'
-        ? Math.max(s.y + s.height, t.y + t.height, ...all.map(e => e.y + e.height)) + 25
-        : Math.min(s.y, t.y, ...all.map(e => e.y)) - 25;
-      if (area) y = Math.max(area.y + 30, Math.min(y, area.y + area.height - 12));
-      const pick = el => {
-        const edge = side === 'below' ? el.y + el.height : el.y;
-        const onEdge = (el.attachers || []).filter(a => Math.abs(a.y + a.height / 2 - edge) < 4);
-        const cands = [];
-        for (let f = 0.5, k = 0; k < 17; k++) { cands.push(Math.round(el.x + el.width * f)); f = 0.5 + (k % 2 ? 1 : -1) * Math.ceil((k + 1) / 2) * 0.05; }
-        const clear = x => x > el.x + 4 && x < el.x + el.width - 4
-          && onEdge.every(a => Math.abs(a.x + a.width / 2 - x) > a.width / 2 + 8)
-          && !obstacles.some(o => segmentHits({ x, y: edge + (side === 'below' ? 1 : -1) }, { x, y }, inflate(boxOf(o), 4)));
-        return cands.find(clear);
-      };
-      const sx = pick(s), tx = pick(t);
-      if (sx == null || tx == null) continue;
-      if (obstacles.some(o => segmentHits({ x: sx, y }, { x: tx, y }, inflate(boxOf(o), 2)))) continue;
-      routeVia(c, [{ x: sx, y }, { x: tx, y }]);
-      return;
-    }
-    // aucune route libre : on garde le tracé automatique (Claude peut le reprendre avec reroute)
+    improveRoute(c, { force: true });
   }
+
 
   /** Trace un flux par des points de passage (coudes), extrémités calées sur le bord des éléments. */
   function routeVia(c, via) {
@@ -523,12 +591,28 @@ export function createApplier(modeler) {
       const el = get(op.id);
       const target = { type: op.type || el.type };
       if (op.event && op.event !== 'none') target.eventDefinitionType = EVENT_DEFS[op.event];
+      if (op.expanded !== undefined) target.isExpanded = !!op.expanded;   // sous-processus : déplier / replier
       const created = bpmnReplace.replaceElement(el, target);
       refs.set(op.id, created.id);
       if (op.name) modeling.updateLabel(created, op.name);
     },
 
     delete(op) { modeling.removeElements([get(op.id)]); },
+
+    /**
+     * Crée un élément sans le relier, à l'intérieur d'un conteneur (sous-processus déplié, pool,
+     * couloir) : c'est ainsi qu'on démarre un sous-processus vide. Position : x, y (centre) ou
+     * à gauche au milieu du conteneur.
+     */
+    add(op) {
+      const parent = op.in ? get(op.in, 'conteneur') : registry.filter(e => is(e, 'bpmn:Participant') || is(e, 'bpmn:Process') && !e.parent).at(0) || canvas.getRootElement();
+      if (is(parent, 'bpmn:SubProcess') && parent.collapsed !== false) throw new OpError(`« ${op.in} » est replié : dépliez-le d'abord (replace avec "expanded": true) ou travaillez dans sa vue détaillée`);
+      const pos = Number.isFinite(op.x) && Number.isFinite(op.y) ? { x: op.x, y: op.y }
+        : parent.width ? { x: parent.x + (is(parent, 'bpmn:Participant') ? 90 : 60), y: parent.y + parent.height / 2 } : { x: 200, y: 200 };
+      const created = modeling.createShape(newShape(op), pos, parent.waypoints ? parent.parent : parent);
+      finish(created, op);
+      placeFree(created);
+    },
 
     /**
      * Passe de retouche (après une réorganisation, ou à la demande) : une sortie par côté pour chaque
@@ -538,13 +622,15 @@ export function createApplier(modeler) {
     tidy() {
       let exits = 0, flows = 0, labels = 0;
       for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
-      for (const c of registry.filter(e => is(e, 'bpmn:SequenceFlow'))) if (untangle(c)) flows++;
+      for (const c of registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints)) if (untangle(c)) flows++;
       for (const g of registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label')) exits += fixGatewayExits(g);
       for (const l of registry.filter(e => e.type === 'label' && e.width && e.labelTarget)) if (freeLabel(l)) labels++;
-      const remaining = registry.filter(e => is(e, 'bpmn:SequenceFlow')).map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
+      const remaining = registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints).map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
+      const stacked = registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints).filter(c => flowConflicts(c).overlap).map(c => c.id);
       const clashes = registry.filter(e => e.type === 'label' && e.width && e.labelTarget && labelClashes(e).length).map(l => l.labelTarget.id);
       notes.push(`Retouches : ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) déplacé(s).`
         + (remaining.length ? ` Flux qui traversent encore un élément : ${remaining.map(([id, h]) => `${id} (${h.join(', ')})`).join(' ; ')}.` : ' Plus aucun flux ne traverse un élément.')
+        + (stacked.length ? ` Flux encore superposés à un autre : ${stacked.join(', ')}.` : '')
         + (clashes.length ? ` Libellés encore en chevauchement : ${clashes.join(', ')}.` : ''));
     },
 

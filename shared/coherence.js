@@ -34,6 +34,7 @@ export const FIXES = {
   'label-too-long': '',
   'flow-crosses': 'Retracez le flux pour qu\'il contourne l\'élément (glissez un de ses coudes), ou déplacez l\'élément. Claude : opération reroute, ou tidy.',
   'gateway-exits': 'Faites partir chaque flèche d\'un côté différent de la passerelle (glissez le départ de la flèche sur un autre coin). Claude : reroute avec side.',
+  'flow-overlap': 'Faites passer l\'une des deux flèches par un couloir libre (au-dessus ou au-dessous), quitte à rallonger un peu. Claude : reroute, ou tidy.',
   'label-overlap': 'Déplacez le libellé à la souris (cliquez dessus puis glissez). Claude : move avec label:true, ou tidy.'
 };
 
@@ -157,6 +158,28 @@ export function geometryIssues(definitions) {
       let crossed = false;
       for (let i = 1; i < pts.length && !crossed; i++) crossed = segHits(pts[i - 1], pts[i], s.b);
       if (crossed) out.push({ id: el.id, name: nameOf(el) || `${nameOf(src)} → ${nameOf(tgt)}`, level: 'warn', text: `le flux traverse « ${nameOf(s.el)} » (${s.el.id}).`, rule: 'flow-crosses', fix: FIXES['flow-crosses'] });
+    }
+  }
+
+  // flux superposés à un autre flux (même ligne) : on ne voit plus lequel va où
+  const segs = pts => pts.slice(1).map((q, i) => [pts[i], q]);
+  const hz = ([p, q]) => Math.abs(p.y - q.y) < 1, vt = ([p, q]) => Math.abs(p.x - q.x) < 1;
+  const olen = (a, b) => {
+    if (hz(a) && hz(b) && Math.abs(a[0].y - b[0].y) < 4) return Math.max(0, Math.min(Math.max(a[0].x, a[1].x), Math.max(b[0].x, b[1].x)) - Math.max(Math.min(a[0].x, a[1].x), Math.min(b[0].x, b[1].x)));
+    if (vt(a) && vt(b) && Math.abs(a[0].x - b[0].x) < 4) return Math.max(0, Math.min(Math.max(a[0].y, a[1].y), Math.max(b[0].y, b[1].y)) - Math.max(Math.min(a[0].y, a[1].y), Math.min(b[0].y, b[1].y)));
+    return 0;
+  };
+  const seqEdges = edges.filter(e => is(e.el, 'bpmn:SequenceFlow'));
+  const reported = new Set();
+  for (let i = 0; i < seqEdges.length; i++) for (let j = i + 1; j < seqEdges.length; j++) {
+    const A = seqEdges[i], B = seqEdges[j];
+    const shared = [A.el.sourceRef, A.el.targetRef].filter(x => x && (x === B.el.sourceRef || x === B.el.targetRef)).map(x => byId.get(x.id)?.b).filter(Boolean);
+    let total = 0;
+    for (const a of segs(A.pts)) for (const b of segs(B.pts)) total += olen(a, b);
+    const worst = total - (shared.length === 1 ? 30 : 0);
+    if (worst > 8 && !reported.has(B.el.id)) {
+      reported.add(B.el.id);
+      out.push({ id: B.el.id, name: nameOf(B.el) || `${nameOf(B.el.sourceRef)} → ${nameOf(B.el.targetRef)}`, level: 'warn', text: `le flux est superposé au flux ${A.el.id} sur ${Math.round(worst)} px.`, rule: 'flow-overlap', fix: FIXES['flow-overlap'] });
     }
   }
 
