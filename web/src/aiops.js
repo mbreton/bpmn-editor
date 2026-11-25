@@ -106,7 +106,8 @@ export function createApplier(modeler) {
 
   /** Décale vers la droite ce qui suit une position, pour faire de la place à un élément inséré. */
   function makeRoom(x, width) {
-    const elements = registry.filter(e => e.parent && e.type !== 'label' && !e.waypoints);
+    // libellés compris : sinon ceux des flux restent en place quand tout le reste se décale
+    const elements = registry.filter(e => e.parent && !e.waypoints);
     const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, 'x', width, x);
     if (movingShapes.length || resizingShapes.length) modeling.createSpace(movingShapes, resizingShapes, { x: width, y: 0 }, 'e', x);
   }
@@ -324,8 +325,17 @@ export function createApplier(modeler) {
      * décalage (dx, dy). Les flux suivent ; si la place est prise, l'élément glisse à la place libre la plus proche.
      */
     move(op) {
-      const el = get(op.id);
-      if (el.waypoints) throw new OpError(`« ${op.id} » est un flux : déplacez ses extrémités`);
+      const owner = get(op.id);
+      if (op.label) {
+        // déplacer le libellé d'un élément ou d'un flux (décalage dx/dy uniquement)
+        const lbl = owner.label;
+        if (!lbl) throw new OpError(`« ${op.id} » n'a pas de libellé à déplacer`);
+        if (!Number.isFinite(op.dx) && !Number.isFinite(op.dy)) throw new OpError('pour un libellé, indiquez dx et/ou dy');
+        modeling.moveShape(lbl, { x: Math.round(op.dx || 0), y: Math.round(op.dy || 0) });
+        return;
+      }
+      const el = owner;
+      if (el.waypoints) throw new OpError(`« ${op.id} » est un flux : utilisez reroute, ou label:true pour déplacer son libellé`);
       if (is(el, 'bpmn:BoundaryEvent')) throw new OpError('un événement de bordure suit son activité : déplacez l\'activité');
       const cx = el.x + el.width / 2, cy = el.y + el.height / 2;
       let tx, ty;
