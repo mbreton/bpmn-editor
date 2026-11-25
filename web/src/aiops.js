@@ -115,8 +115,9 @@ export function createApplier(modeler) {
         if (len) total += len;
         else if (!shared.length && crosses(a, b)) n++;
       }
-      if (total - (shared.length === 1 ? 30 : 0) > 8) { overlap++; withIds.add(o.id); }
-      if (n) { cross += n; withIds.add(o.id); }
+      const k = settled.has(o.id) ? 2 : 1;
+      if (total - (shared.length === 1 ? 30 : 0) > 8) { overlap += k; withIds.add(o.id); }
+      if (n) { cross += n * k; withIds.add(o.id); }
     }
     return { overlap, cross, with: withIds };
   }
@@ -126,14 +127,25 @@ export function createApplier(modeler) {
     const side = exitSide(c, c.waypoints);
     return (c.source.outgoing || []).find(o => o.id !== c.id && wpOf(o)?.length && exitSide(o, wpOf(o)) === side) || null;
   }
+  /** Vrais virages : changements de direction (les points alignés ou confondus ne comptent pas). */
+  function bendCount(pts) {
+    const dirs = [];
+    for (let i = 1; i < pts.length; i++) {
+      const dx = pts[i].x - pts[i - 1].x, dy = pts[i].y - pts[i - 1].y;
+      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
+      const d = Math.abs(dx) < 1 ? `v${Math.sign(dy)}` : Math.abs(dy) < 1 ? `h${Math.sign(dx)}` : `d${Math.sign(dx)}${Math.sign(dy)}`;
+      if (dirs.at(-1) !== d) dirs.push(d);
+    }
+    return Math.max(0, dirs.length - 1);
+  }
   const lengthOf = pts => segsOfPts(pts).reduce((n, [p, q]) => n + Math.abs(p.x - q.x) + Math.abs(p.y - q.y), 0);
   function routeInfo(c) {
     const { overlap, cross, with: withIds } = flowConflicts(c);
     const clash = sideClashWith(c);
     if (clash) withIds.add(clash.id);
     const hits = crossedBy(c).length;
-    const bends = c.waypoints.length - 2;
-    const cost = hits * 1000 + (clash ? 600 : 0) + overlap * 300 + cross * 80 + bends * 25 + lengthOf(c.waypoints) / 20;
+    const bends = bendCount(c.waypoints);
+    const cost = hits * 1000 + (clash ? (settled.has(clash.id) ? 1200 : 600) : 0) + overlap * 300 + cross * 80 + bends * 25 + lengthOf(c.waypoints) / 20;
     return { cost, clean: !hits && !clash && !overlap && !cross, with: withIds, bends };
   }
   const routeCost = c => routeInfo(c).cost;
@@ -164,7 +176,10 @@ export function createApplier(modeler) {
     return out;
   }
   const copyPts = w => w.map(p => ({ x: p.x, y: p.y }));
-  const straight = c => (wpOf(c) || []).length === 2;
+  /** Flux droits et sans conflit au début d'une retouche : on n'y touche pas, les autres les évitent. */
+  let settled = new Set();
+  const settle = () => { settled = new Set(registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints).filter(c => { const i = routeInfo(c); return i.clean && i.bends === 0; }).map(c => c.id)); };
+  const straight = c => bendCount(wpOf(c) || []) === 0;
 
   /**
    * Cherche le meilleur tracé pour un flux : ne traverse aucun élément, ne se superpose à aucun autre
@@ -174,6 +189,7 @@ export function createApplier(modeler) {
   function improveRoute(c, { force = false } = {}) {
     if (!c.waypoints) return false;
     const keep = copyPts(c.waypoints);
+    if (!force && settled.has(c.id)) return false;
     const cur = routeInfo(c);
     if (!force && cur.clean && cur.bends === 0) return false;
     let best = { cost: force ? Infinity : cur.cost, pts: keep };
@@ -193,13 +209,13 @@ export function createApplier(modeler) {
    * déjà droit n'est jamais déplacé pour ça.
    */
   function untanglePair(c) {
-    if (!c.waypoints) return false;
+    if (!c.waypoints || settled.has(c.id)) return false;
     const info = routeInfo(c);
     // partenaires : ceux qui gênent le tracé actuel, ou un meilleur tracé (plus direct) de c
     const partners = new Set(info.with);
     const mine = candidates(c);
     for (const pts of mine) {
-      if (pts.length - 2 >= info.bends && info.clean) continue;
+      if (bendCount(pts) >= info.bends && info.clean) continue;
       const ri = routeInfo(as(c, pts));
       if (!crossedBy(as(c, pts)).length) for (const id of ri.with) partners.add(id);
     }
@@ -216,7 +232,7 @@ export function createApplier(modeler) {
       const base = total(cKeep, oKeep);
       // les meilleurs tracés de c (l'autre flux restant en place), puis toutes les variantes de l'autre
       const cOpts = [cKeep, ...mine.map(pts => [routeCost(as(c, pts)), pts]).sort((a, b) => a[0] - b[0]).slice(0, 8).map(x => x[1])];
-      const oOpts = straight(o) ? [oKeep] : [oKeep, ...candidates(o)];
+      const oOpts = straight(o) || settled.has(o.id) ? [oKeep] : [oKeep, ...candidates(o)];
       let best = { cost: base - 3, pc: null, po: null };
       for (const pc of cOpts) for (const po of oOpts) {
         const t = total(pc, po);
@@ -243,7 +259,11 @@ export function createApplier(modeler) {
     const core = inflate(boxOf(lbl), -1);
     const linesHit = registry.filter(e => e.waypoints && !is(e, 'bpmn:Association')
       && e.waypoints.some((p, i) => i > 0 && segmentHits(e.waypoints[i - 1], p, e === owner ? inflate(core, 1) : core)));
-    return [...shapesHit, ...linesHit];
+    // un libellé reste dans le sous-processus de son élément (sans mordre sur le bord ni le titre)
+    const home = owner?.waypoints ? owner.parent : (owner?.host || owner)?.parent;
+    const outside = home?.parent && Number.isFinite(home.width) && is(home, 'bpmn:SubProcess') && home.collapsed === false
+      && !(lbl.x >= home.x + 4 && lbl.x + lbl.width <= home.x + home.width - 4 && lbl.y >= home.y + 22 && lbl.y + lbl.height <= home.y + home.height - 4);
+    return [...shapesHit, ...linesHit, ...(outside ? [home] : [])];
   }
   /** Déplace un libellé externe qui recouvre un élément ou un autre libellé vers une place libre proche. */
   function freeLabel(lbl) {
@@ -499,7 +519,7 @@ export function createApplier(modeler) {
       const score = c => { const t = c.target, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
         return side === 'right' ? -(tc.x - gc.x) + Math.abs(tc.y - gc.y) * 2 : side === 'left' ? (tc.x - gc.x) + Math.abs(tc.y - gc.y) * 2
           : side === 'bottom' ? -(tc.y - gc.y) + Math.abs(tc.x - gc.x) * 2 : (tc.y - gc.y) + Math.abs(tc.x - gc.x) * 2; };
-      list.sort((a, b) => score(a) - score(b));
+      list.sort((a, b) => (settled.has(b.id) - settled.has(a.id)) || score(a) - score(b));   // un flux figé garde son côté
       used.add(side);
       for (const c of list.slice(1)) {
         const t = c.target, tc = { x: t.x + t.width / 2, y: t.y + t.height / 2 };
@@ -907,7 +927,9 @@ export function createApplier(modeler) {
       let exits = 0, flows = 0, notesFixed = 0;
       const allNotes = registry.filter(e => is(e, 'bpmn:TextAnnotation'));
       for (const n of allNotes) if (fitAnnotation(n)) notesFixed++;
+      settle();   // avant de resserrer : ce qui était droit et propre doit le rester
       const rows = compactRows();
+      settled = new Set([...settled].filter(id => { const c = registry.get(id); return c?.waypoints && bendCount(c.waypoints) === 0; }));
       const seqFlows = () => registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints);
       const gateways = () => registry.filter(e => is(e, 'bpmn:Gateway') && e.type !== 'label');
       for (const g of gateways()) exits += fixGatewayExits(g);
@@ -917,6 +939,7 @@ export function createApplier(modeler) {
       for (const c of seqFlows()) { const i = routeInfo(c); if ((!i.clean || i.bends) && untanglePair(c)) touched.add(c.id); }
       for (const g of gateways()) exits += fixGatewayExits(g);
       flows = touched.size;
+      settled = new Set();
       const labels = normalizeLabels(registry.filter(e => e.type === 'label'));
       for (const n of allNotes) if (placeNote(n)) notesFixed++;
       const remaining = seqFlows().map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
