@@ -482,7 +482,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     if (m.type === 'focus' && m.userId === user.id) { focus.show(m.ids, { highlight: true }); return; }
     if (m.type === 'explore' && m.userId === user.id) { explorer.replay(m.choices); return; }
     if (m.type === 'apply') return live.reply(m, await applyFromClaude(m.changes));
-    if (m.type === 'render') return live.reply(m, await renderPng(m.area));
+    if (m.type === 'render') return live.reply(m, await renderPng(m.area, m.ids || []));
   }
 
   /** Modifications demandées par Claude via le connecteur : appliquées, montrées, sauvegardées. */
@@ -505,7 +505,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     try {
       for (const c of changes) {
         const r = applier.apply(c);
-        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.added || [], overlaps: r.overlaps || [] });
+        results.push({ title: c.title, ok: r.ok, error: r.error, added: r.addedInfo || r.added || [], overlaps: r.overlaps || [] });
         if (r.ok) shown.push(...(c.focus || []).map(applier.resolve), ...r.added, ...r.changed);
       }
     } finally { importing = false; }
@@ -529,14 +529,25 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     return { ok: true, results, check: saved.check };
   }
 
-  async function renderPng(area) {
+  async function renderPng(area, ids = []) {
     try {
       let { svg } = await modeler.saveSVG();
       let caption = 'Diagramme entier';
-      if (area === 'screen') {
+      const crop = (x, y, w, h, outW, outH) => svg.replace(/<svg([^>]*)>/, (all, attrs) => `<svg${attrs.replace(/\s(width|height|viewBox)="[^"]*"/g, '')} width="${Math.round(outW)}" height="${Math.round(outH)}" viewBox="${x} ${y} ${w} ${h}">`);
+      if (ids.length) {
+        // zone autour des éléments demandés (libellés compris), sans toucher à l'écran de l'utilisateur
+        const reg = modeler.get('elementRegistry');
+        const els = ids.map(i => reg.get(i)).filter(Boolean);
+        if (!els.length) return { ok: false, error: `Éléments introuvables : ${ids.join(', ')}` };
+        const boxes = els.flatMap(e => [e, ...(e.labels || []).filter(l => l.width)]).flatMap(e => e.waypoints ? e.waypoints.map(p => ({ x: p.x, y: p.y, width: 0, height: 0 })) : [e]);
+        const x1 = Math.min(...boxes.map(b => b.x)) - 120, y1 = Math.min(...boxes.map(b => b.y)) - 100;
+        const x2 = Math.max(...boxes.map(b => b.x + b.width)) + 120, y2 = Math.max(...boxes.map(b => b.y + b.height)) + 100;
+        svg = crop(x1, y1, x2 - x1, y2 - y1, x2 - x1, y2 - y1);
+        caption = `Zone autour de ${els.map(e => e.id).join(', ')} (x ${Math.round(x1)}→${Math.round(x2)}, y ${Math.round(y1)}→${Math.round(y2)})`;
+      } else if (area === 'screen') {
         const vb = modeler.get('canvas').viewbox();
-        svg = svg.replace(/<svg([^>]*)>/, (all, attrs) => `<svg${attrs.replace(/\s(width|height|viewBox)="[^"]*"/g, '')} width="${Math.round(vb.outer.width)}" height="${Math.round(vb.outer.height)}" viewBox="${vb.x} ${vb.y} ${vb.width} ${vb.height}">`);
-        caption = 'Partie visible à l\'écran';
+        svg = crop(vb.x, vb.y, vb.width, vb.height, vb.outer.width, vb.outer.height);
+        caption = `Partie visible à l'écran (x ${Math.round(vb.x)}→${Math.round(vb.x + vb.width)}, y ${Math.round(vb.y)}→${Math.round(vb.y + vb.height)})`;
       }
       const blob = await svgToPng(svg, { maxSide: 2000 });
       const b64 = await new Promise(res => { const fr = new FileReader(); fr.onload = () => res(String(fr.result).split(',')[1]); fr.readAsDataURL(blob); });

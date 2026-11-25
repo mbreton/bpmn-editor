@@ -36,6 +36,49 @@ export function createApplier(modeler) {
     if (!LAYOUTS.includes(route)) throw new OpError(`tracé « ${route} » inconnu (h:v, v:h, h:h ou v:v)`);
     return { preferredLayouts: [route] };
   };
+  /**
+   * Flux qui revient en arrière (cible à gauche de la source) : le tracé automatique part à la
+   * verticale et traverse la ligne principale. On le fait passer sous les éléments qu'il enjambe.
+   */
+  function loopBelowIfBackward(c) {
+    if (!is(c, 'bpmn:SequenceFlow')) return;
+    const s = c.source, t = c.target;
+    if (!(t.x + t.width < s.x)) return;
+    const parent = c.parent;
+    const between = registry.filter(e => e.parent === parent && !e.waypoints && e.type !== 'label' && !isContainerShape(e)
+      && e !== s && e !== t && e.x < s.x + s.width && e.x + e.width > t.x);
+    const labelsBelow = registry.filter(e => e.type === 'label' && e.labelTarget && between.includes(e.labelTarget));
+    const attLabels = registry.filter(e => e.type === 'label' && e.labelTarget?.host && between.includes(e.labelTarget.host));
+    const area = parent && isContainerShape(parent) ? parent : null;
+    const all = [...between, ...labelsBelow, ...attLabels];
+    const obstacles = [...between, ...registry.filter(e => e.type === 'label' && e.width && (e.labelTarget?.parent === parent || e.labelTarget?.host?.parent === parent))]
+      .filter(e => e !== s && e !== t && e.labelTarget !== s && e.labelTarget !== t);
+    // sous les éléments enjambés, sinon au-dessus ; sortie et arrivée à l'écart des événements de
+    // bordure, sans que la descente (ou la montée) traverse quoi que ce soit
+    for (const side of ['below', 'above']) {
+      let y = side === 'below'
+        ? Math.max(s.y + s.height, t.y + t.height, ...all.map(e => e.y + e.height)) + 25
+        : Math.min(s.y, t.y, ...all.map(e => e.y)) - 25;
+      if (area) y = Math.max(area.y + 30, Math.min(y, area.y + area.height - 12));
+      const pick = el => {
+        const edge = side === 'below' ? el.y + el.height : el.y;
+        const onEdge = (el.attachers || []).filter(a => Math.abs(a.y + a.height / 2 - edge) < 4);
+        const cands = [];
+        for (let f = 0.5, k = 0; k < 17; k++) { cands.push(Math.round(el.x + el.width * f)); f = 0.5 + (k % 2 ? 1 : -1) * Math.ceil((k + 1) / 2) * 0.05; }
+        const clear = x => x > el.x + 4 && x < el.x + el.width - 4
+          && onEdge.every(a => Math.abs(a.x + a.width / 2 - x) > a.width / 2 + 8)
+          && !obstacles.some(o => segmentHits({ x, y: edge + (side === 'below' ? 1 : -1) }, { x, y }, inflate(boxOf(o), 4)));
+        return cands.find(clear);
+      };
+      const sx = pick(s), tx = pick(t);
+      if (sx == null || tx == null) continue;
+      if (obstacles.some(o => segmentHits({ x: sx, y }, { x: tx, y }, inflate(boxOf(o), 2)))) continue;
+      routeVia(c, [{ x: sx, y }, { x: tx, y }]);
+      return;
+    }
+    // aucune route libre : on garde le tracé automatique (Claude peut le reprendre avec reroute)
+  }
+
   /** Trace un flux par des points de passage (coudes), extrémités calées sur le bord des éléments. */
   function routeVia(c, via) {
     const pts = via.map(p => {
@@ -108,7 +151,19 @@ export function createApplier(modeler) {
   function makeRoom(x, width) {
     // libellés compris : sinon ceux des flux restent en place quand tout le reste se décale
     const elements = registry.filter(e => e.parent && !e.waypoints);
-    const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, 'x', width, x);
+    let { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, 'x', width, x);
+    // une note suit l'élément qu'elle commente, pas la ligne de décalage
+    const moving = new Set(movingShapes);
+    const linkedTo = a => [...(a.incoming || []), ...(a.outgoing || [])].map(c => c.source === a ? c.target : c.source).filter(Boolean);
+    movingShapes = movingShapes.filter(sh => {
+      if (!is(sh, 'bpmn:TextAnnotation')) return true;
+      const others = linkedTo(sh);
+      return !others.length || others.some(o => moving.has(o) || moving.has(o.host));
+    });
+    for (const sh of elements) {
+      if (!is(sh, 'bpmn:TextAnnotation') || moving.has(sh)) continue;
+      if (linkedTo(sh).some(o => moving.has(o))) movingShapes.push(sh);
+    }
     if (movingShapes.length || resizingShapes.length) modeling.createSpace(movingShapes, resizingShapes, { x: width, y: 0 }, 'e', x);
   }
 
@@ -236,8 +291,9 @@ export function createApplier(modeler) {
   function overlapsOf(shape) {
     if (shape.waypoints || shape.type === 'label' || is(shape, 'bpmn:BoundaryEvent') || !shape.parent) return [];
     const parent = shape.parent;
+    const encloses = (c, s) => c.x <= s.x && c.y <= s.y && c.x + c.width >= s.x + s.width && c.y + c.height >= s.y + s.height;
     return registry.filter(e => e !== shape && e !== parent && e.type !== 'label' && !e.waypoints && e.host !== shape && e !== shape.host
-      && (e.parent === parent) && hit(inflate(boxOf(shape), 2), boxOf(e))).map(e => e.id);
+      && (e.parent === parent) && !(isContainerShape(e) && encloses(e, shape)) && hit(inflate(boxOf(shape), 2), boxOf(e))).map(e => e.id);
   }
 
   const OPS = {
@@ -296,6 +352,7 @@ export function createApplier(modeler) {
       if (!c) throw new OpError('liaison impossible entre ces éléments');
       if (op.ref) refs.set(op.ref, c.id);
       if (Array.isArray(op.via) && op.via.length) routeVia(c, op.via);
+      else if (!op.route) loopBelowIfBackward(c);
       if (op.name) modeling.updateLabel(c, op.name);
       if (op.condition) modeling.updateProperties(c, { conditionExpression: expr(op.condition) });
     },
@@ -450,7 +507,12 @@ export function createApplier(modeler) {
     // compte rendu de placement : un élément ajouté ou déplacé qui en recouvre encore un autre
     const overlaps = [];
     for (const id of [...added, ...changed]) { const el = registry.get(id); const o = el ? overlapsOf(el) : []; if (o.length) overlaps.push(`${id} recouvre ${o.join(', ')}`); }
-    return { ok: true, added, changed, mark, overlaps };
+    // éléments créés, les flux avec leur origine et leur destination (pour les cibler ensuite)
+    const addedInfo = added.map(id => {
+      const el = registry.get(id);
+      return el?.waypoints ? `${id} (${el.source?.id} → ${el.target?.id})` : id;
+    });
+    return { ok: true, added, addedInfo, changed, mark, overlaps };
   }
 
   function undoTo(mark) {

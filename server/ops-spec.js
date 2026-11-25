@@ -13,8 +13,8 @@ Operations (use existing ids from the diagram; give new elements a readable uniq
 - {"op":"attach","ref":"<newId>","to":"<activityId>","event":"timer","interrupting":false,"name":"…"}  (boundary event on an activity or sub-process)
 - {"op":"connect","ref":"<newFlowId>","from":"<id>","to":"<id>","name":"…","condition":"\${…}"}
 - {"op":"replace","id":"<id>","type":"bpmn:ServiceTask"}                             (change element type, keeps connections; for events also "event")
-- {"op":"delete","id":"<id>"}
-- {"op":"reroute","id":"<sequenceFlowId>","route":"h:v|v:h|h:h|v:v"}   (redraw a flow: h:v = leave horizontally then turn vertically, v:h = leave vertically first…; or "via":[{"x":..,"y":..},…] bend points for a precise path, e.g. to loop back below the main line. "connect" also accepts "route" and "via")
+- {"op":"delete","id":"<id>"}   (deleting an element that has exactly one incoming and one outgoing flow reconnects its neighbours automatically: do not add a "connect" for them)
+- {"op":"reroute","id":"<sequenceFlowId>","route":"h:v|v:h|h:h|v:v"}   (redraw a flow: h:v = leave horizontally then turn vertically, v:h = leave vertically first…; or "via":[{"x":..,"y":..},…] bend points for a precise path, e.g. to loop back below the main line. "connect" also accepts "route" and "via"; without them, a flow going back to the left is automatically drawn below the elements it passes)
 - {"op":"move","id":"<id>","next_to":"<otherId>","side":"right|left|below|above","gap":50}   (or "x","y" = new centre, or "dx","dy"; connected flows follow; if the spot is taken the element slides to the nearest free spot unless "avoid_overlap":false). With "label":true and dx/dy, moves only the label of an element or a flow
 - {"op":"set_timer","id":"<eventId>","kind":"timeDuration|timeDate|timeCycle","value":"P3D"}
 - {"op":"set_interrupting","id":"<boundaryOrEventSubprocessStartId>","value":false}

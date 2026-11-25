@@ -22,6 +22,21 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
     const lbl = { error: 'BLOQUANT', warn: 'à vérifier', info: 'remarque' };
     return `Cohérence :\n${shown.slice(0, max).map(i => `- ${lbl[i.level]} · ${formatIssue(i)}`).join('\n')}${shown.length > max ? `\n… et ${shown.length - max} autre(s)` : ''}`;
   };
+  /** Cohérence en différentiel : seulement ce qui apparaît ou disparaît (le reste : get_diagram). */
+  const key = i => `${i.rule}|${i.id}|${i.text}`;
+  const diffText = (before, after) => {
+    const had = new Set(before.map(key)), now = new Set(after.map(key));
+    const added = after.filter(i => !had.has(key(i)) && i.level !== 'info');
+    const gone = before.filter(i => !now.has(key(i)) && i.level !== 'info');
+    const kept = after.filter(i => had.has(key(i)) && i.level !== 'info').length;
+    const lbl = { error: 'BLOQUANT', warn: 'à vérifier' };
+    const parts = [];
+    if (added.length) parts.push(`Nouveaux problèmes :\n${added.map(i => `- ${lbl[i.level]} · ${formatIssue(i)}`).join('\n')}`);
+    if (gone.length) parts.push(`Résolus : ${gone.map(i => `[${i.id}] ${i.text}`).join(' ; ')}`);
+    if (!added.length && !gone.length) parts.push('Cohérence : aucun changement.');
+    if (kept) parts.push(`(${kept} point${kept > 1 ? 's' : ''} déjà présent${kept > 1 ? 's' : ''} avant, non répété${kept > 1 ? 's' : ''} : voir get_diagram.)`);
+    return parts.join('\n');
+  };
   const checked = async xml => { const r = await checkDiagram(xml); return { ...r, check: { issues: r.issues, ms: r.ms } }; };
   const explorations = new Map(); // `${userId}:${diagramId}` → [optionId…]
 
@@ -97,12 +112,12 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
 
     server.registerTool('view_diagram', {
       title: 'Voir le rendu',
-      description: 'Image (PNG) du diagramme tel qu\'il s\'affiche dans le navigateur de l\'utilisateur : area "screen" pour ce qu\'il voit actuellement, "all" pour le diagramme entier. Nécessite que le diagramme soit ouvert dans son navigateur.',
-      inputSchema: { diagram: z.string(), area: z.enum(['screen', 'all']).optional() }
-    }, async ({ diagram, area }) => {
+      description: 'Image (PNG) du diagramme tel qu\'il s\'affiche dans le navigateur de l\'utilisateur. element_ids : zone autour de ces éléments (le plus utile pour vérifier une modification, sans déplacer la vue de l\'utilisateur) ; sinon area "screen" (ce qu\'il voit) ou "all" (diagramme entier, peu lisible s\'il est grand). La légende donne les coordonnées de la zone. Nécessite que le diagramme soit ouvert dans son navigateur.',
+      inputSchema: { diagram: z.string(), area: z.enum(['screen', 'all']).optional(), element_ids: z.array(z.string()).optional() }
+    }, async ({ diagram, area, element_ids }) => {
       const d = find(diagram);
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
-      const r = await hub.request(d.id, user.id, { type: 'render', area: area || 'all' });
+      const r = await hub.request(d.id, user.id, { type: 'render', area: area || 'all', ids: element_ids || [] });
       if (!r) return fail(notOpen(d));
       if (!r.ok) return fail(r.error || 'Rendu impossible.');
       return { content: [{ type: 'image', data: r.png, mimeType: 'image/png' }, { type: 'text', text: r.caption || '' }] };
@@ -125,6 +140,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
       const locked = guardLock(d); if (locked) return fail(locked);
       const t0 = Date.now();
+      const before = (await checkDiagram((await diagrams.get(d.id)).xml)).issues || [];
       const r = await hub.request(d.id, user.id, { type: 'apply', changes }, 30000);
       if (!r) return fail(notOpen(d));
       const lines = (r.results || []).map(x => x.ok ? `✓ ${x.title}${x.added?.length ? ` (ajoutés : ${x.added.join(', ')})` : ''}${x.overlaps?.length ? `\n  ⚠ chevauchement à corriger (opération move) : ${x.overlaps.join(' ; ')}` : ''}` : `✗ ${x.title} : ${x.error}`);
@@ -133,7 +149,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       }
       if (!r.ok) return fail(r.error || 'Modification impossible.');
       const issues = r.check?.issues || [];
-      return text(`${lines.join('\n')}\n\n${lines.some(l => l.startsWith('✓')) ? 'Brouillon enregistré, visible à l\'écran (annulable avec undo).' : 'Rien n\'a été modifié.'}\n${issuesText(issues)}\n(contrôle de cohérence : ${r.check?.ms ?? '?'} ms ; aller-retour complet : ${Date.now() - t0} ms)`);
+      return text(`${lines.join('\n')}\n\n${lines.some(l => l.startsWith('✓')) ? 'Brouillon enregistré, visible à l\'écran (annulable avec undo).' : 'Rien n\'a été modifié.'}\n${diffText(before, issues)}\n(contrôle : ${r.check?.ms ?? '?'} ms ; aller-retour : ${Date.now() - t0} ms)`);
     });
 
     const stepTool = (name, title, delta, description) => server.registerTool(name, {
@@ -142,6 +158,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       const d = find(diagram);
       if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
       const locked = guardLock(d); if (locked) return fail(locked);
+      const beforeXml = (await diagrams.get(d.id)).xml;
       const done = [];
       let last = null;
       for (let i = 0; i < steps; i++) {
@@ -152,8 +169,9 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       }
       if (!last) return fail(delta < 0 ? 'Rien à annuler.' : 'Rien à rétablir.');
       const { check, issues } = await checked(last.xml);
+      const before = (await checkDiagram(beforeXml)).issues || [];
       hub.broadcast(d.id, { type: 'draft', xml: last.xml, draft: last.draft, check, by: `${user.name} (via Claude)`, label: `${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}`, source: 'mcp' });
-      return text(`${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}.\n${issuesText(issues)}`);
+      return text(`${delta < 0 ? 'Annulé' : 'Rétabli'} : ${done.join(' ; ')}.\n${diffText(before, issues)}`);
     });
     stepTool('undo', 'Annuler', -1, 'Annule la ou les dernières modifications du brouillon (celles de Claude comme celles faites à l\'écran).');
     stepTool('redo', 'Rétablir', 1, 'Rétablit une modification annulée.');

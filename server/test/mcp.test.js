@@ -137,7 +137,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
 
   const applied = await call('apply_changes', { diagram: diagramId, changes: [{ title: 'Signature électronique', ops: [{ op: 'update', id: 'Task_Signer', name: 'Signer électroniquement' }] }] });
   assert.match(txt(applied), /✓ Signature électronique/);
-  const ms = Number(/contrôle de cohérence : ([\d.]+) ms/.exec(txt(applied))[1]);
+  const ms = Number(/contrôle : ([\d.]+) ms/.exec(txt(applied))[1]);
   assert.ok(ms < 300, `contrôle rapide (${ms} ms)`);
   let d = await (await http('GET', `/api/diagrams/${diagramId}`)).json();
   assert.match(d.xml, /Signer électroniquement/);
