@@ -111,8 +111,10 @@ export function createApplier(modeler) {
       // (aucune pour un aller-retour entre les deux mêmes éléments)
       let total = 0, n = 0;
       const theirs = segsOfPts(wpOf(o));
+      const merging = c.target && c.target === o.target;   // même cible, même sens : les flèches se rejoignent, c'est normal
       for (const a of mine) for (const b of theirs) {
         const len = overlapLen(a, b);
+        if (len && merging && Math.sign(a[1].x - a[0].x) === Math.sign(b[1].x - b[0].x) && Math.sign(a[1].y - a[0].y) === Math.sign(b[1].y - b[0].y)) continue;
         if (len) total += len;
         else if (!shared.length && crosses(a, b)) n++;
       }

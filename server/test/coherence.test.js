@@ -84,3 +84,18 @@ test('réorganisation : espacements resserrés', async () => {
   const width = Math.max(...b.map(([x, w]) => x + w)) - Math.min(...b.map(([x]) => x));
   assert.ok(width < 1900, `largeur ${width} (bibliothèque par défaut : ~2430)`);
 });
+
+test('deux flèches qui se rejoignent vers la même cible ne sont pas « superposées »', async () => {
+  const { geometryIssues } = await import('../../shared/coherence.js');
+  const T = { id: 'G', $type: 'bpmn:ExclusiveGateway' }, A = { id: 'A', $type: 'bpmn:Task' }, B = { id: 'B', $type: 'bpmn:Task' }, C = { id: 'C', $type: 'bpmn:Task' };
+  const f = (id, s, t) => ({ id, $type: 'bpmn:SequenceFlow', sourceRef: s, targetRef: t });
+  const pe = (el, pts) => ({ bpmnElement: el, waypoint: pts.map(([x, y]) => ({ x, y })) });
+  const sh = (el, x, y, w, h) => ({ bpmnElement: el, bounds: { x, y, width: w, height: h } });
+  const is = (o, t) => o.$type === t || (t === 'bpmn:Gateway' && /Gateway$/.test(o.$type)) || (t === 'bpmn:FlowNode');
+  const mk = flows => ({ diagrams: [{ plane: { planeElement: [sh(A, 0, 0, 100, 80), sh(B, 0, 200, 100, 80), sh(C, 600, 0, 100, 80), sh(T, 500, 15, 50, 50), ...flows] } }], $instanceOf: () => false });
+  const merge = mk([pe(f('F1', A, T), [[100, 40], [500, 40]]), pe(f('F2', B, T), [[100, 240], [300, 240], [300, 40], [500, 40]])]);
+  const rules = d => geometryIssues(d).map(i => i.rule);
+  assert.ok(!rules(merge).includes('flow-overlap'), 'convergence vers la même passerelle : pas signalée');
+  const clash = mk([pe(f('F1', A, T), [[100, 40], [500, 40]]), pe(f('F3', B, C), [[100, 240], [300, 240], [300, 40], [600, 40]])]);
+  assert.ok(rules(clash).includes('flow-overlap'), 'cibles différentes : toujours signalée');
+});

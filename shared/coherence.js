@@ -178,8 +178,11 @@ export function geometryIssues(definitions) {
   for (let i = 0; i < seqEdges.length; i++) for (let j = i + 1; j < seqEdges.length; j++) {
     const A = seqEdges[i], B = seqEdges[j];
     const shared = [A.el.sourceRef, A.el.targetRef].filter(x => x && (x === B.el.sourceRef || x === B.el.targetRef)).map(x => byId.get(x.id)?.b).filter(Boolean);
+    // deux flèches qui vont dans le même sens vers la même cible se rejoignent : c'est normal
+    const sameDir = (a, b) => Math.sign(a[1].x - a[0].x) === Math.sign(b[1].x - b[0].x) && Math.sign(a[1].y - a[0].y) === Math.sign(b[1].y - b[0].y);
+    const merging = A.el.targetRef && A.el.targetRef === B.el.targetRef;
     let total = 0;
-    for (const a of segs(A.pts)) for (const b of segs(B.pts)) total += olen(a, b);
+    for (const a of segs(A.pts)) for (const b of segs(B.pts)) { const l = olen(a, b); if (l && !(merging && sameDir(a, b))) total += l; }
     const worst = total - (shared.length === 1 ? 30 : 0);
     if (worst > 8 && !reported.has(B.el.id)) {
       reported.add(B.el.id);
