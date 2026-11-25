@@ -199,6 +199,7 @@ async function renderLibrary() {
         <span class="muted small">${esc(fmtDate(d.updatedAt))}${d.updatedBy ? ' · ' + esc(d.updatedBy) : ''} · <span class="mono">${esc(d.path)}</span></span></a>
       ${d.lock ? `<span class="pill warn">${esc(d.lock.author || 'Quelqu\'un')} modifie</span>` : ''}
       <button class="btn small ghost" data-act="rename" data-id="${esc(d.id)}">Renommer</button>
+      <button class="btn small ghost" data-act="dup" data-id="${esc(d.id)}">Dupliquer</button>
       ${isAdmin ? `<button class="btn small ghost danger" data-act="del" data-id="${esc(d.id)}">Supprimer</button>` : ''}
     </article>`).join('');
   };
@@ -211,6 +212,9 @@ async function renderLibrary() {
     if (b.dataset.act === 'rename') {
       const name = await dialog({ title: 'Renommer', input: { value: d.name }, buttons: [{ label: 'Annuler', value: null }, { label: 'Renommer', value: '$input', primary: true }] });
       if (name?.trim() && name.trim() !== d.name) { try { await api.rename(d.id, name.trim()); renderLibrary(); } catch (err) { toast(err.message, 'error'); } }
+    } else if (b.dataset.act === 'dup') {
+      const name = await dialog({ title: 'Dupliquer', body: 'La copie reprend l\'état actuel du diagramme (brouillon compris). Elle a son propre historique.', input: { value: `${d.name} (copie)` }, buttons: [{ label: 'Annuler', value: null }, { label: 'Dupliquer', value: '$input', primary: true }] });
+      if (name?.trim()) { try { const c = await api.duplicate(d.id, name.trim()); toast(`Copie créée : ${c.name}`); navigate(`/d/${c.id}`); } catch (err) { toast(err.message, 'error'); } }
     } else {
       const ok = await dialog({ title: 'Supprimer ce diagramme ?', body: `« ${d.name} » disparaît de la liste. Son historique reste dans le dépôt Git (commit de suppression).`, buttons: [{ label: 'Annuler', value: false }, { label: 'Supprimer', value: true, danger: true, primary: true }] });
       if (ok) { try { await api.remove(d.id); toast('Diagramme supprimé.'); renderLibrary(); } catch (err) { toast(err.message, 'error'); } }

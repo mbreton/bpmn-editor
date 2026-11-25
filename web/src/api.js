@@ -36,6 +36,7 @@ export const api = {
   create: (name, xml) => request('POST', '/api/diagrams', { name, xml }),
   get: id => request('GET', `/api/diagrams/${id}`),
   rename: (id, name) => request('PATCH', `/api/diagrams/${id}`, { name }),
+  duplicate: (id, name) => request('POST', `/api/diagrams/${id}/duplicate`, { name }),
   remove: id => request('DELETE', `/api/diagrams/${id}`),
   draft: (id, body) => request('PUT', `/api/diagrams/${id}/draft`, body),
   undo: (id, holder) => request('POST', `/api/diagrams/${id}/undo`, { holder }),

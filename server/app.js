@@ -202,6 +202,16 @@ export async function buildApp(config) {
     } catch (e) { return gitFail(reply, e); }
   });
 
+  app.post('/api/diagrams/:id/duplicate', async (req, reply) => {
+    const u = requireUser(req, reply); if (!u) return;
+    const name = req.body?.name;
+    if (name !== undefined && name !== '' && !str(name)) return fail(reply, 400, 'Nom invalide (200 caractères max).');
+    try {
+      const d = await diagrams.duplicate(req.params.id, { name, user: u });
+      return d ? reply.code(201).send(d) : fail(reply, 404, 'Diagramme introuvable.');
+    } catch (e) { return gitFail(reply, e); }
+  });
+
   app.patch('/api/diagrams/:id', async (req, reply) => {
     const u = requireUser(req, reply); if (!u) return;
     if (!str(req.body?.name)) return fail(reply, 400, 'Nom requis.');

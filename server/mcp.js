@@ -286,6 +286,17 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, version = '
       return text(`Diagramme « ${d.name} » créé [id ${d.id}] : ${url(d.id)}`);
     });
 
+    server.registerTool('duplicate_diagram', {
+      title: 'Dupliquer un diagramme',
+      description: 'Copie un diagramme (son état de travail courant, brouillon compris) sous un nouveau nom, avec son propre historique ; renvoie l\'adresse de la copie. À faire seulement quand l\'utilisateur le demande.',
+      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme à copier'), name: z.string().max(200).optional().describe('Nom de la copie (par défaut « <nom> (copie) »)') }
+    }, async ({ diagram, name }) => {
+      const d = find(diagram);
+      if (!d) return text(`Diagramme « ${diagram} » introuvable.`);
+      const c = await diagrams.duplicate(d.id, { name, user });
+      return text(`Copie « ${c.name} » créée [id ${c.id}] : ${url(c.id)}`);
+    });
+
     return server;
   }
 

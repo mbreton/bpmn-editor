@@ -92,6 +92,19 @@ export function createDiagrams({ db, git }) {
       return { ...d, rev: sha, version: 1 };
     },
 
+    /** Copie un diagramme (état de travail courant, brouillon compris) sous un nouveau nom libre. */
+    async duplicate(id, { name, user }) {
+      const src = await this.get(id);
+      if (!src) return null;
+      const taken = new Set(db.listDiagrams().map(d => d.name));
+      let n = (name || '').trim() || `${src.name} (copie)`;
+      if (taken.has(n)) { const base = n.replace(/ \(copie(?: \d+)?\)$/, ''); for (let k = 2; taken.has(n); k++) n = `${base} (copie ${k})`; }
+      const path = freePath(n);
+      const sha = await git.write(path, src.xml, { author: authorOf(user), message: `Copie de ${src.name} : ${n}` });
+      const d = db.insertDiagram({ name: n, path, updatedBy: user.name });
+      return { ...d, rev: sha, version: 1 };
+    },
+
     async rename(id, name, user) {
       const d = db.getDiagram(id);
       if (!d) return null;

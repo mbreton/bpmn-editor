@@ -112,7 +112,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   client = new Client({ name: 'test', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
   const names = (await client.listTools()).tools.map(t => t.name).sort();
-  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'explore', 'get_diagram', 'history', 'list_diagrams', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'view_diagram']);
+  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'duplicate_diagram', 'explore', 'get_diagram', 'history', 'list_diagrams', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'view_diagram']);
   const call = async (name, args) => (await client.callTool({ name, arguments: args }));
   const txt = r => r.content.map(c => c.text || '').join('\n');
 

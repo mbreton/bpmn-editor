@@ -155,12 +155,20 @@ export function createGitStore({ dir, remote, branch = 'main', subdir = 'diagram
     /** Historique d'un fichier, du plus récent au plus ancien. */
     history: path => serial(async () => {
       if (!(await hasCommits())) return [];
-      const r = await git(['log', '--follow', `--format=%H${SEP}%an${SEP}%ae${SEP}%at${SEP}%s`, '--', path], { allowFail: true });
+      // --follow suit les renommages, mais aussi les « copies » détectées par contenu (un diagramme
+      // dupliqué ou ressemblant à un autre) : on s'arrête au commit qui a créé le fichier (A) ou l'a copié (C).
+      const r = await git(['log', '--follow', '--name-status', `--format=@@${SEP}%H${SEP}%an${SEP}%ae${SEP}%at${SEP}%s`, '--', path], { allowFail: true });
       if (!r.ok) return [];
-      const rows = r.stdout.trim().split('\n').filter(Boolean).map(l => {
-        const [sha, author, email, at, message] = l.split(SEP);
-        return { sha, author, email, createdAt: Number(at) * 1000, message };
-      });
+      const rows = [];
+      let cur = null, stop = false;
+      for (const l of r.stdout.split('\n')) {
+        if (l.startsWith(`@@${SEP}`)) {
+          if (stop) break;
+          const [, sha, author, email, at, message] = l.split(SEP);
+          cur = { sha, author, email, createdAt: Number(at) * 1000, message };
+          rows.push(cur);
+        } else if (cur && /^[AC]\d*\t/.test(l)) stop = true;
+      }
       return rows.map((v, i) => ({ ...v, version: rows.length - i }));
     }),
 

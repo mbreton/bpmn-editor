@@ -130,6 +130,30 @@ test('création, verrou, brouillon continu, annuler/rétablir, version Git sign�
   await call('POST', `/api/diagrams/${d.id}/unlock`, { cookie: aliceCookie, body: { holder: 'A' } });
 });
 
+test('dupliquer : la copie reprend le brouillon courant, nom rendu unique', async () => {
+  const d = (await call('POST', '/api/diagrams', { cookie: aliceCookie, body: { name: 'Source copie' } })).json();
+  const full = (await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie })).json();
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/lock`, { cookie: aliceCookie, body: { holder: 'D' } })).json().acquired, true);
+  const draft = full.xml.replace('name="Début"', 'name="Brouillon en cours"');
+  await call('PUT', `/api/diagrams/${d.id}/draft`, { cookie: aliceCookie, body: { xml: draft, holder: 'D' } });
+  const c1 = await call('POST', `/api/diagrams/${d.id}/duplicate`, { cookie: aliceCookie, body: {} });
+  assert.equal(c1.statusCode, 201);
+  assert.equal(c1.json().name, 'Source copie (copie)');
+  const copy = (await call('GET', `/api/diagrams/${c1.json().id}`, { cookie: aliceCookie })).json();
+  assert.match(copy.xml, /Brouillon en cours/, 'le brouillon est copié');
+  assert.equal(copy.version, 1);
+  assert.equal(copy.draft.dirty, false, 'la copie démarre propre');
+  const c2 = (await call('POST', `/api/diagrams/${d.id}/duplicate`, { cookie: aliceCookie, body: {} })).json();
+  assert.equal(c2.name, 'Source copie (copie 2)');
+  const c3 = (await call('POST', `/api/diagrams/${d.id}/duplicate`, { cookie: aliceCookie, body: { name: 'Variante B' } })).json();
+  assert.equal(c3.name, 'Variante B');
+  assert.match((await call('GET', `/api/diagrams/${d.id}`, { cookie: aliceCookie })).json().xml, /Brouillon en cours/, 'l\'original est intact');
+  assert.equal((await call('POST', '/api/diagrams/inconnu/duplicate', { cookie: aliceCookie, body: {} })).statusCode, 404);
+  assert.equal((await call('POST', `/api/diagrams/${d.id}/duplicate`, { body: {} })).statusCode, 401);
+  await call('POST', `/api/diagrams/${d.id}/unlock`, { cookie: aliceCookie, body: { holder: 'D' } });
+  for (const x of [d, c1.json(), c2, c3]) assert.equal((await call('DELETE', `/api/diagrams/${x.id}`, { cookie: adminCookie })).statusCode, 200);
+});
+
 test('renommage avec git mv : l\'historique suit', async () => {
   const r = await call('PATCH', `/api/diagrams/${diagramId}`, { cookie: aliceCookie, body: { name: 'Souscription AV' } });
   assert.equal(r.json().path, 'diagrams/souscription-av.bpmn');

@@ -70,6 +70,7 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
         <div class="menu-wrap"><button class="btn" id="exp" aria-haspopup="true" aria-label="Exporter" title="Exporter ou copier le lien"><span class="ic">⇩</span><span class="bl">Exporter</span></button>
           <div class="menu" id="expMenu" hidden>
             <button data-x="link">Copier le lien de la page</button>
+            <button data-x="dup">Dupliquer le diagramme…</button>
             <button data-x="bpmn">Fichier .bpmn</button><button data-x="svg">Image SVG</button><button data-x="png">Image PNG</button>
           </div></div>
         <button class="btn icon ghost side-toggle" id="sideToggle" title="Panneau latéral" aria-label="Afficher ou masquer le panneau">☰</button>
@@ -430,6 +431,16 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     expMenu.hidden = true;
     const base = safeFilename(ctx.name);
     if (kind === 'link') copyText(location.href);
+    if (kind === 'dup') {
+      const name = await dialog({ title: 'Dupliquer', body: 'La copie reprend l\'état actuel du diagramme (brouillon compris). Elle a son propre historique.', input: { value: `${ctx.name} (copie)` }, buttons: [{ label: 'Annuler', value: null }, { label: 'Dupliquer', value: '$input', primary: true }] });
+      if (!name?.trim()) return;
+      try {
+        if (saveTimer) await flushSave();
+        const c = await api.duplicate(id, name.trim());
+        toast(`Copie créée : ${c.name}`);
+        location.assign(`/d/${c.id}`);
+      } catch (err) { toast(err.message, 'error'); }
+    }
     if (kind === 'bpmn') download(`${base}.bpmn`, await ctx.getXml(), 'application/xml');
     if (kind === 'svg') download(`${base}.svg`, (await modeler.saveSVG()).svg, 'image/svg+xml');
     if (kind === 'png') download(`${base}.png`, await svgToPng((await modeler.saveSVG()).svg), 'image/png');
