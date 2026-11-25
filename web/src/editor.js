@@ -4,6 +4,10 @@ import 'bpmn-js/dist/assets/diagram-js.css';
 import 'bpmn-js/dist/assets/bpmn-js.css';
 import 'bpmn-js/dist/assets/bpmn-font/css/bpmn-embedded.css';
 import '@bpmn-io/diagram-js-canvas-lock/assets/canvas-lock.css';
+import 'bpmn-js-color-picker/colors/color-picker.css';
+import BpmnColorPickerModule from 'bpmn-js-color-picker';
+import AnnotationFillModule from './annotationfill.js';
+import { COLOR_PRESETS } from './colors.js';
 
 import { api } from './api.js';
 import { $, $$, esc, fmtTime, toast, dialog, download, safeFilename } from './dom.js';
@@ -96,7 +100,9 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   const edEl = $('.ed', root);
   const modeler = new BpmnModeler({
     container: $('#canvas', root),
-    additionalModules: [TranslateModule, CanvasLockModule]
+    additionalModules: [TranslateModule, CanvasLockModule, BpmnColorPickerModule, AnnotationFillModule],
+    // palette de couleurs du menu contextuel (icône pinceau à côté d'un élément sélectionné)
+    colorPicker: { colors: COLOR_PRESETS.map(c => ({ label: c.label, fill: c.fill, stroke: c.stroke })) }
   });
   const canvasLock = modeler.get('canvasLock');
   window.__bpmnModeler = modeler; // utile pour le débogage depuis la console

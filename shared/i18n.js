@@ -33,6 +33,7 @@ const FR = {
   'Divide into three lanes': 'Diviser en trois couloirs',
   'Change element': 'Changer le type',
   'Change type': 'Changer le type',
+  'Set color': 'Couleur',
   'Connect to other element': 'Relier à un autre élément',
   'Connect using association': 'Relier par une association',
   'Connect using data input association': 'Relier par une association de données',

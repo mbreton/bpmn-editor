@@ -29,6 +29,7 @@
   "devDependencies": {
     "@bpmn-io/diagram-js-canvas-lock": "^0.1.0",
     "bpmn-js": "^18.33.1",
+    "bpmn-js-color-picker": "^0.7.2",
     "concurrently": "^10.0.7",
     "vite": "^8.3.8"
   }

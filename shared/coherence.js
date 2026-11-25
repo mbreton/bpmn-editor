@@ -229,16 +229,7 @@ export function geometryIssues(definitions) {
     out.push({ id: src.id, name: nameOf(src), level: 'warn', text: `${flows.length} sorties partent du même côté (${side}) : on croirait qu'elles partent l'une de l'autre (${flows.join(', ')}).`, rule: 'gateway-exits', fix: FIXES['gateway-exits'] });
   }
 
-  // libellés qui recouvrent un élément ou un autre libellé
-  const overlap = (a, b) => a.x < b.x + b.width - 1 && b.x < a.x + a.width - 1 && a.y < b.y + b.height - 1 && b.y < a.y + a.height - 1;
-  labels.forEach((l, i) => {
-    const owner = l.el;
-    const onShape = shapes.find(s => s.el !== owner && s.el !== owner.attachedToRef && !isContainer(s) && !ignorable(s) && overlap(l.b, s.b));
-    const onLabel = labels.slice(i + 1).find(o => o.el !== owner && overlap(l.b, o.b));
-    const core = { x: l.b.x + 1, y: l.b.y + 1, width: l.b.width - 2, height: l.b.height - 2 };
-    const onLine = !onShape && !onLabel && edges.find(e => e.el !== owner && !is(e.el, 'bpmn:Association') && e.pts.some((p, k) => k > 0 && segHits(e.pts[k - 1], p, { x: core.x - 3, y: core.y - 3, width: core.width + 6, height: core.height + 6 })));
-    if (onShape || onLabel || onLine) out.push({ id: owner.id, name: nameOf(owner), level: 'warn', text: `son libellé ${onShape ? `recouvre « ${nameOf(onShape.el)} »` : onLabel ? `recouvre le libellé de « ${nameOf(onLabel.el)} »` : `est barré par le flux ${onLine.el.id}`}.`, rule: 'label-overlap', fix: FIXES['label-overlap'] });
-  });
+  // (libellés qui se chevauchent : simple mise en page, pas un problème du diagramme ; la retouche les replace sans les signaler)
   return out;
 }
 

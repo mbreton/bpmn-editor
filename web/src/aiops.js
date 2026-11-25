@@ -4,6 +4,7 @@
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { createFocus } from './focus.js';
 import { labelOverflow, overflowText, overflowFix, lineCount } from '../../shared/labelfit.js';
+import { COLOR_PRESETS } from './colors.js';
 
 const EVENT_DEFS = {
   timer: 'bpmn:TimerEventDefinition', message: 'bpmn:MessageEventDefinition', error: 'bpmn:ErrorEventDefinition',
@@ -370,6 +371,22 @@ export function createApplier(modeler) {
     modeling.moveShape(lbl, { x: ox - lbl.x, y: oy - lbl.y });
     return freeLabel(lbl);
   }
+  const LAYOUT_OPS = new Set(['append', 'insert', 'attach', 'connect', 'delete', 'move', 'reroute', 'replace', 'add', 'space', 'resize']);
+  /** Libellé resté loin de ce qu'il nomme (plus de 30 px de son élément ou de son flux). */
+  function labelFar(lbl) {
+    const o = lbl.labelTarget, b = boxOf(lbl);
+    const distPt = p => Math.hypot(Math.max(b.x - p.x, 0, p.x - (b.x + b.width)), Math.max(b.y - p.y, 0, p.y - (b.y + b.height)));
+    if (o.waypoints) {
+      let best = Infinity;
+      for (const [p, q] of segsOfPts(o.waypoints)) {
+        const n = Math.max(1, Math.ceil((Math.abs(q.x - p.x) + Math.abs(q.y - p.y)) / 10));
+        for (let i = 0; i <= n; i++) best = Math.min(best, distPt({ x: p.x + (q.x - p.x) * i / n, y: p.y + (q.y - p.y) * i / n }));
+      }
+      return best > 30;
+    }
+    const gapX = Math.max(o.x - (b.x + b.width), 0, b.x - (o.x + o.width)), gapY = Math.max(o.y - (b.y + b.height), 0, b.y - (o.y + o.height));
+    return Math.hypot(gapX, gapY) > 30;
+  }
   /** Tous les libellés : ceux des éléments d'abord, puis ceux des flux ; deux passes. */
   function normalizeLabels(list) {
     const moved = new Set();
@@ -692,6 +709,24 @@ export function createApplier(modeler) {
   }
 
   /** Décale vers la droite ce qui suit une position, pour faire de la place à un élément inséré. */
+  /**
+   * Le décalage (spaceTool) déplace les éléments et les tracés, pas les libellés des flux : ceux dont
+   * les deux extrémités ont bougé suivent du même décalage, les autres sont replacés près de leur flux.
+   */
+  function carryFlowLabels(moving, delta, run) {
+    const moved = new Set(moving);
+    const flows = [...new Set(moving.flatMap(e => [...(e.incoming || []), ...(e.outgoing || [])]))].filter(c => c.label?.width);
+    const before = new Map(flows.map(c => [c, { x: c.label.x, y: c.label.y }]));
+    run();
+    for (const c of flows) {
+      const b = before.get(c), l = c.label;
+      if (!l || Math.abs(l.x - b.x) > 0.5 || Math.abs(l.y - b.y) > 0.5) continue;   // déjà déplacé
+      const both = moved.has(c.source) || moved.has(c.source?.host);
+      const both2 = moved.has(c.target) || moved.has(c.target?.host);
+      if (both && both2) modeling.moveShape(l, delta);
+      else normalizeLabel(l);
+    }
+  }
   /** Racine (plan) d'un élément : le diagramme principal ou la vue détaillée d'un sous-processus replié. */
   const planeOf = e => { let r = e; while (r.parent) r = r.parent; return r; };
   function makeRoom(x, width, plane = canvas.getRootElement()) {
@@ -710,7 +745,7 @@ export function createApplier(modeler) {
       if (!is(sh, 'bpmn:TextAnnotation') || moving.has(sh)) continue;
       if (linkedTo(sh).some(o => moving.has(o))) movingShapes.push(sh);
     }
-    if (movingShapes.length || resizingShapes.length) modeling.createSpace(movingShapes, resizingShapes, { x: width, y: 0 }, 'e', x);
+    if (movingShapes.length || resizingShapes.length) carryFlowLabels(movingShapes, { x: width, y: 0 }, () => modeling.createSpace(movingShapes, resizingShapes, { x: width, y: 0 }, 'e', x));
   }
 
   // ---------- placement sans chevauchement ----------
@@ -853,7 +888,8 @@ export function createApplier(modeler) {
     const elements = registry.filter(e => e.parent && !e.waypoints && planeOf(e) === plane);
     const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, axis, Math.abs(delta), start);
     if (!movingShapes.length && !resizingShapes.length) return;
-    modeling.createSpace(movingShapes, resizingShapes, axis === 'x' ? { x: delta, y: 0 } : { x: 0, y: delta }, axis === 'x' ? 'e' : 's', start);
+    const d = axis === 'x' ? { x: delta, y: 0 } : { x: 0, y: delta };
+    carryFlowLabels(movingShapes, d, () => modeling.createSpace(movingShapes, resizingShapes, d, axis === 'x' ? 'e' : 's', start));
     if (delta < 0) {
       const bad = movingShapes.filter(e => e.type !== 'label').flatMap(e => overlapsOf(e).map(o => `${e.id}/${o}`));
       if (bad.length) throw new OpError(`pas assez de place pour resserrer de ${-delta} px : chevauchement (${bad.slice(0, 4).join(', ')}). Essayez un décalage plus petit.`);
@@ -921,6 +957,24 @@ export function createApplier(modeler) {
       if (op.name !== undefined) { checkFits(el, op.name); modeling.updateLabel(el, op.name); }
       if (op.documentation !== undefined) setDoc(el, op.documentation);
       if (is(el, 'bpmn:TextAnnotation')) { fitAnnotation(el, { widen: op.name !== undefined }); placeNote(el); }
+    },
+
+    /**
+     * Couleur d'éléments (ou "all" : tout le diagramme affiché) : preset (orange, yellow, green, blue,
+     * red, purple, grey, default = couleur normale) ou fill / stroke en hexadécimal.
+     */
+    color(op) {
+      const preset = op.preset ? COLOR_PRESETS.find(c => c.key === op.preset) : null;
+      if (op.preset && !preset) throw new OpError(`couleur « ${op.preset} » inconnue (${COLOR_PRESETS.map(c => c.key).join(', ')})`);
+      const hex = v => v === undefined || v === null || /^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(v);
+      if (!hex(op.fill) || !hex(op.stroke)) throw new OpError('fill et stroke : couleur hexadécimale, par ex. #FFE0B2');
+      const plane = canvas.getRootElement();
+      const els = op.ids === 'all' || op.id === 'all'
+        ? registry.filter(e => e.parent && e.type !== 'label' && !is(e, 'bpmn:Participant') && !is(e, 'bpmn:Lane') && planeOf(e) === plane)
+        : (Array.isArray(op.ids) ? op.ids : [op.id]).map(id => get(id));
+      if (!els.length) throw new OpError('aucun élément à colorer');
+      const colors = preset ? { fill: preset.fill, stroke: preset.stroke } : { fill: op.fill || undefined, stroke: op.stroke || undefined };
+      modeling.setColor(els, colors);
     },
 
     /** Redimensionne un élément (commentaire, sous-processus déplié, pool) ; le coin haut gauche reste en place. */
@@ -1189,12 +1243,12 @@ export function createApplier(modeler) {
       if (dy > 0) {
         const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'y', dy, oldBottom - 1);
         const moving = movingShapes.filter(e => !isInside(e, c) && e !== c);
-        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: 0, y: dy }, 's', oldBottom - 1);
+        if (moving.length) carryFlowLabels(moving, { x: 0, y: dy }, () => modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: 0, y: dy }, 's', oldBottom - 1));
       }
       if (dx > 0) {
         const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'x', dx, oldRight - 1);
         const moving = movingShapes.filter(e => !isInside(e, c) && e !== c);
-        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: dx, y: 0 }, 'e', oldRight - 1);
+        if (moving.length) carryFlowLabels(moving, { x: dx, y: 0 }, () => modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: dx, y: 0 }, 'e', oldRight - 1));
       }
     }
   }
@@ -1229,6 +1283,11 @@ export function createApplier(modeler) {
       const fresh = added.map(id => registry.get(id)).filter(Boolean);
       for (const n of fresh.filter(e => is(e, 'bpmn:TextAnnotation'))) { fitAnnotation(n, { widen: true }); placeNote(n); }
       normalizeLabels(fresh.map(e => e.label).filter(Boolean));
+      if (change.ops.some(o => LAYOUT_OPS.has(o.op))) {
+        const plane = canvas.getRootElement();
+        const drifted = registry.filter(l => l.type === 'label' && l.width && l.labelTarget && planeOf(l) === plane && (labelFar(l) || labelClashes(l).length));
+        normalizeLabels(drifted);
+      }
     } catch (e) { console.warn('mise en forme des ajouts', e); }
     const changed = [...touched].filter(id => after.has(id) && registry.get(id));
     // compte rendu de placement : un élément ajouté ou déplacé qui en recouvre encore un autre

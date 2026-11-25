@@ -2,6 +2,7 @@
 // et comment le corriger. Clic sur un problème : zoom sur l'élément concerné.
 import { h } from './dom.js';
 import { checkCoherence } from '../../shared/coherence.js';
+import { createFocus } from './focus.js';
 
 const LEVELS = [
   ['error', 'Bloquants', 'Le processus est cassé ou ambigu à cet endroit. Claude ne peut pas en ajouter de nouveaux.'],
@@ -20,11 +21,21 @@ export function createChecks(ctx, host, { tabButton } = {}) {
   const selection = modeler.get('selection');
   const canvas = modeler.get('canvas');
 
-  function focusElement(id) {
-    const el = registry.get(id);
-    if (!el) return;
-    selection.select(el);
-    canvas.scrollToElement(el, { top: 120, bottom: 120, left: 120, right: 120 });
+  const focus = createFocus(modeler);
+  /**
+   * Zoom sur la zone où agir : l'élément concerné et ceux que cite le message (flux, élément traversé,
+   * autre sortie de passerelle…), surlignés quelques secondes.
+   */
+  function focusIssue(i) {
+    const cited = [...String(i.text || '').matchAll(/[A-Za-z_][\w.-]{3,}/g)].map(m => m[0]).filter(id => id !== i.id && registry.get(id) && registry.get(id).type !== 'label');
+    const ids = [i.id, ...new Set(cited)].filter(id => id && registry.get(id));
+    if (!ids.length) return;
+    // un élément d'une vue détaillée (sous-processus replié) : on ouvre cette vue d'abord
+    const el = registry.get(ids[0]);
+    let root = el; while (root.parent) root = root.parent;
+    if (root !== canvas.getRootElement()) canvas.setRootElement(root);
+    focus.show(ids, { highlight: true, maxZoom: 1.2, pad: 120 });
+    if (ids.length === 1) selection.select(el);
   }
 
   function render() {
@@ -38,7 +49,7 @@ export function createChecks(ctx, host, { tabButton } = {}) {
     }
     const el = h(`<div class="props checks">
       <h3 class="props-title">Contrôles du diagramme</h3>
-      <p class="muted small">Vérifiés à chaque sauvegarde${ctx.check ? ` (en ${ctx.check.ms} ms)` : ''}. Cliquez sur un nom pour voir l'élément.</p>
+      <p class="muted small">Vérifiés à chaque sauvegarde${ctx.check ? ` (en ${ctx.check.ms} ms)` : ''}. Cliquez sur un point pour zoomer sur la zone concernée.</p>
       <div class="groups"></div>
     </div>`);
     const groups = el.querySelector('.groups');
@@ -51,12 +62,12 @@ export function createChecks(ctx, host, { tabButton } = {}) {
       g.querySelector('p').textContent = about;
       const ul = g.querySelector('ul');
       for (const i of list) {
-        const li = h('<li><div class="ck-head"><button class="linklike" type="button"></button><span class="ck-text"></span></div></li>');
+        const li = h('<li class="ck-item" title="Cliquer pour zoomer sur la zone"><div class="ck-head"><button class="linklike" type="button"></button><span class="ck-text"></span></div></li>');
         const btn = li.querySelector('button');
         const bo = i.id && registry.get(i.id)?.businessObject;
         btn.textContent = (bo && (bo.name || '').replace(/\s+/g, ' ')) || i.name || i.id || 'Diagramme';
         btn.disabled = !(i.id && registry.get(i.id));
-        btn.addEventListener('click', () => focusElement(i.id));
+        if (!btn.disabled) { li.classList.add('clickable'); li.addEventListener('click', () => focusIssue(i)); }
         li.querySelector('.ck-text').textContent = ` : ${i.text}`;
         if (i.fix) {
           const fix = h('<p class="ck-fix"><b>Comment corriger :</b> <span></span></p>');
