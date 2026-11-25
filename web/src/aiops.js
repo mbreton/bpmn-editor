@@ -3,6 +3,7 @@
 // (placement automatique, insertion sur un flux), pas par Claude.
 import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
 import { createFocus } from './focus.js';
+import { labelOverflow, overflowText, overflowFix } from '../../shared/labelfit.js';
 
 const EVENT_DEFS = {
   timer: 'bpmn:TimerEventDefinition', message: 'bpmn:MessageEventDefinition', error: 'bpmn:ErrorEventDefinition',
@@ -122,8 +123,16 @@ export function createApplier(modeler) {
     return elementFactory.createShape(attrs);
   }
 
+  /** Refuse un nom qui déborderait de sa boîte (les tâches ont une taille fixe). */
+  function checkFits(el, name) {
+    if (!name || el.waypoints) return;
+    const o = labelOverflow(el.type, name, { width: el.width, height: el.height, expanded: is(el, 'bpmn:SubProcess') && el.collapsed === false });
+    if (o) throw new OpError(`« ${name} » : ${overflowText(o)} ${overflowFix(o)}`);
+  }
+
   function finish(shape, op) {
     if (op.ref) refs.set(op.ref, shape.id);
+    checkFits(shape, op.name);
     if (op.name) modeling.updateLabel(shape, op.name);
     if (op.timer) setTimer(shape, op.timer.kind, op.timer.value);
     if (op.documentation) setDoc(shape, op.documentation);
@@ -299,7 +308,7 @@ export function createApplier(modeler) {
   const OPS = {
     update(op) {
       const el = get(op.id);
-      if (op.name !== undefined) modeling.updateLabel(el, op.name);
+      if (op.name !== undefined) { checkFits(el, op.name); modeling.updateLabel(el, op.name); }
       if (op.documentation !== undefined) setDoc(el, op.documentation);
     },
 

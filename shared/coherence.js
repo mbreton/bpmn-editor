@@ -3,6 +3,7 @@
 // warn = incomplet ou douteux (signalé, accepté : un diagramme en construction en a forcément),
 // info = remarque.
 import { TYPE_LABELS, explainIso } from './i18n.js';
+import { labelOverflow, overflowText, overflowFix } from './labelfit.js';
 
 const is = (bo, type) => !!bo && (bo.$instanceOf ? bo.$instanceOf(type) : bo.$type === type);
 const typeLabel = bo => TYPE_LABELS[bo?.$type] || String(bo?.$type || '').replace('bpmn:', '');
@@ -29,7 +30,8 @@ export const FIXES = {
   timer: 'Dans le champ Délai : une durée (P15D = 15 jours, PT4H = 4 heures), une date (2026-12-01T09:00:00Z) ou un cycle (R3/P1D = 3 fois, tous les jours).',
   refs: 'Facultatif : donnez un nom au message / à l\'erreur dans les propriétés, pour savoir précisément lequel est attendu.',
   conditional: 'Saisissez la condition qui déclenche l\'événement.',
-  start: 'Ajoutez un événement de début (cercle fin) au point de départ du processus.'
+  start: 'Ajoutez un événement de début (cercle fin) au point de départ du processus.',
+  'label-too-long': ''
 };
 
 /** Délai lisible ? Renvoie un message d'erreur, ou null si correct. */
@@ -48,6 +50,9 @@ export function checkCoherence(definitions) {
   const out = [];
   const add = (bo, level, text, rule) => out.push({ id: bo?.id, name: nameOf(bo), level, text, rule, fix: FIXES[rule] || '' });
   const processes = (definitions.rootElements || []).filter(r => is(r, 'bpmn:Process'));
+  // tailles dessinées (pour savoir si le nom tient dans la boîte)
+  const shapes = new Map();
+  for (const d of definitions.diagrams || []) for (const pe of d.plane?.planeElement || []) if (pe.bounds && pe.bpmnElement) shapes.set(pe.bpmnElement.id, pe);
 
   const walk = container => {
     const elements = container.flowElements || [];
@@ -98,6 +103,11 @@ export function checkCoherence(definitions) {
         if (rk && !d[rk.prop] && !is(e, 'bpmn:EndEvent') && !(is(e, 'bpmn:StartEvent') && inEventSub && rk.prop === 'errorRef')) add(e, 'info', `${rk.label} non référencé(e).`, 'refs');
         if (is(d, 'bpmn:ErrorEventDefinition') && is(e, 'bpmn:BoundaryEvent') && e.cancelActivity === false) add(e, 'error', 'un événement d\'erreur de bordure est toujours interrompant.', 'boundary');
         if (is(d, 'bpmn:ConditionalEventDefinition') && !d.condition?.body?.trim()) add(e, 'warn', 'événement conditionnel sans condition.', 'conditional');
+      }
+      if (e.name) {
+        const pe = shapes.get(e.id);
+        const o = labelOverflow(e.$type, e.name, { width: pe?.bounds?.width, height: pe?.bounds?.height, expanded: !!pe?.isExpanded });
+        if (o) out.push({ id: e.id, name: nameOf(e), level: 'warn', text: overflowText(o), rule: 'label-too-long', fix: overflowFix(o) });
       }
       if (e.flowElements) walk(e);
     }

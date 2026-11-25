@@ -1,7 +1,7 @@
 // Réorganisation automatique (bpmn-auto-layout, version 2 épinglée) + deux retouches :
 // les libellés d'événements/passerelles restés loin de leur élément sont replacés dessous, et les
 // associations (ex. compensation) que la bibliothèque ne dessine pas sont recréées.
-import { layoutProcess } from 'bpmn-auto-layout';
+import { layoutProcess } from './vendor/auto-layout.js';
 import { BpmnModdle } from 'bpmn-moddle';
 
 const moddle = new BpmnModdle();

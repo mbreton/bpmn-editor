@@ -1,5 +1,7 @@
 // Description des opérations de modification, donnée à Claude (outil apply_changes du connecteur MCP).
-export const OPS_SPEC = `Each change is an object:
+export const OPS_SPEC = `NAMES MUST FIT THEIR SHAPE: a task box (100×80) holds 5 short lines, about 55 characters; event and gateway labels about 4 lines (≈ 60 characters). Write short names (verb + object) and put details, rules, thresholds and legal references in "documentation". A name that would overflow is rejected with the length to aim for.
+
+Each change is an object:
 { "title": "short title in French",
   "why": "why this change, in French (1-2 sentences)",
   "benefit": "what it brings, in French (1 sentence)",

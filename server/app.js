@@ -5,6 +5,7 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { openDb } from './db.js';
 import { createAuth } from './auth.js';
 import { createGitStore, GitError } from './git.js';
@@ -27,7 +28,10 @@ export async function buildApp(config) {
   const auth = createAuth({ db, sessionSecret: config.sessionSecret, secureCookies: config.secureCookies ?? 'auto' });
   const git = createGitStore({ dir: config.gitDir, remote: config.gitRemote, branch: config.gitBranch || 'main', subdir: config.gitSubdir || 'diagrams', log });
   const diagrams = createDiagrams({ db, git });
-  const hub = createHub({ log });
+  // version de l'interface servie : une page ouverte avant un déploiement se recharge d'elle-même
+  const indexFile = config.webRoot && join(config.webRoot, 'index.html');
+  const build = indexFile && existsSync(indexFile) ? createHash('sha256').update(readFileSync(indexFile)).digest('hex').slice(0, 12) : 'dev';
+  const hub = createHub({ log, build });
   const mcp = createMcp({ db, diagrams, hub, checkDiagram, layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
@@ -90,7 +94,8 @@ export async function buildApp(config) {
     return {
       user: u ? { id: u.id, name: u.name, email: u.email, role: u.role } : null,
       pendingUsers: u?.role === 'admin' ? db.countPending() : undefined,
-      git: { remote: !!config.gitRemote, branch: git.status.branch }
+      git: { remote: !!config.gitRemote, branch: git.status.branch },
+      build
     };
   });
 

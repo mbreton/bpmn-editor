@@ -16,6 +16,7 @@ import { createChecks } from './checks.js';
 import { createApplier } from './aiops.js';
 import { createFocus } from './focus.js';
 import { connectLive } from './live.js';
+import { labelOverflow } from '../../shared/labelfit.js';
 
 const RENEW_MS = 30_000;
 const POLL_MS = 60_000;
@@ -237,6 +238,15 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   }
   $('#checkBadge', root).addEventListener('click', () => selectTab('checks'));
 
+  // ---------- texte trop long pour sa boîte (saisie à l'écran) ----------
+  modeler.on('commandStack.element.updateLabel.postExecuted', ({ context }) => {
+    if (importing || ctx.previewing) return;
+    const el = context.element?.labelTarget || context.element;
+    if (!el || el.waypoints) return;
+    const o = labelOverflow(el.type, context.newLabel, { width: el.width, height: el.height, expanded: el.type.endsWith('SubProcess') && el.collapsed === false });
+    if (o) toast(`Texte trop long pour la boîte (${o.lines} lignes pour ${o.maxLines}) : visez ${o.suggest} caractères environ et mettez le détail dans la documentation (panneau Propriétés).`, 'error');
+  });
+
   // ---------- brouillon : sauvegarde continue ----------
   modeler.on('commandStack.changed', e => {
     if (importing || e?.trigger === 'clear') return;
@@ -457,6 +467,15 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
   // ---------- temps réel : autres pages et Claude (connecteur MCP) ----------
   const focus = createFocus(modeler);
   async function onLive(m) {
+    if (m.type === 'welcome') {
+      // l'éditeur a été mis à jour depuis l'ouverture de la page : on recharge (le brouillon est sauvegardé)
+      if (m.build && cfg.build && m.build !== cfg.build && cfg.build !== 'dev') {
+        toast('Nouvelle version de l\'éditeur : rechargement…');
+        await flushPending();
+        setTimeout(() => location.reload(), 800);
+      }
+      return;
+    }
     if (m.type === 'presence') {
       const others = m.people.filter(p => p.id !== user.id).map(p => p.name);
       const pr = $('#presence', root);

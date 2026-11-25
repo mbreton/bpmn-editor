@@ -64,3 +64,23 @@ test('réorganisation : les couleurs sont conservées', async () => {
   assert.match(r.xml, /xmlns:bioc="http:\/\/bpmn.io\/schema\/bpmn\/biocolor\/1.0"/);
   assert.equal(r.styled, 1);
 });
+
+test('texte trop long pour la boîte : signalé avec la longueur à viser', async () => {
+  const { labelOverflow } = await import('../../shared/labelfit.js');
+  assert.equal(labelOverflow('bpmn:Task', "Affichage de l'AV avec faux crédit et simulation des intérêts"), null, '5 lignes : tient');
+  const o = labelOverflow('bpmn:Task', 'Questionnaire – Connaissances et expérience financières (profil de risque)');
+  assert.deepEqual([o.lines, o.maxLines], [6, 5], 'déborde comme dans bpmn-js (6 lignes)');
+  assert.equal(labelOverflow('bpmn:SubProcess', 'x '.repeat(80), { expanded: true }), null, 'sous-processus déplié : titre sur une ligne, pas de limite');
+  const long = onboarding.replace('name="Signer le contrat"', 'name="Recueil des informations LCBFT (origine des fonds, profession, revenus et patrimoine)"');
+  const r = await checkDiagram(long);
+  const i = r.issues.find(x => x.rule === 'label-too-long');
+  assert.equal(i?.id, 'Task_Signer');
+  assert.match(i.fix, /Raccourcissez le nom à \d+ caractères/);
+});
+
+test('réorganisation : espacements resserrés', async () => {
+  const r = await relayout(onboarding);
+  const b = [...r.xml.matchAll(/Bounds x="([-\d.]+)" y="[-\d.]+" width="([\d.]+)"/g)].map(m => [Number(m[1]), Number(m[2])]);
+  const width = Math.max(...b.map(([x, w]) => x + w)) - Math.min(...b.map(([x]) => x));
+  assert.ok(width < 1900, `largeur ${width} (bibliothèque par défaut : ~2430)`);
+});

@@ -3,7 +3,7 @@
 // opérations, produire une image du rendu) : c'est ainsi que le MCP agit sur l'écran de l'utilisateur.
 import { randomBytes } from 'node:crypto';
 
-export function createHub({ log = console } = {}) {
+export function createHub({ log = console, build = 'dev' } = {}) {
   const clients = new Set(); // { socket, user, diagramId, holder, editing, lastActive }
   const waiting = new Map(); // reqId → { resolve, timer }
 
@@ -14,6 +14,7 @@ export function createHub({ log = console } = {}) {
   function attach(socket, user) {
     const c = { socket, user, diagramId: null, holder: null, editing: false, lastActive: Date.now() };
     clients.add(c);
+    try { socket.send(JSON.stringify({ type: 'welcome', build })); } catch { /* fermé */ }
     socket.on('message', raw => {
       let m; try { m = JSON.parse(raw); } catch { return; }
       c.lastActive = Date.now();
