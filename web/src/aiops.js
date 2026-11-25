@@ -138,15 +138,44 @@ export function createApplier(modeler) {
     }
     return Math.max(0, dirs.length - 1);
   }
+  /** Éléments dont le flux longe le bord (trait du flux posé sur le trait de la boîte) : illisible. */
+  function bordersHugged(c) {
+    const out = [];
+    const segs = segsOf(c);
+    for (const e of registry.getAll()) {
+      if (!e.parent || e.waypoints || e.type === 'label' || !Number.isFinite(e.width) || is(e, 'bpmn:Participant') || is(e, 'bpmn:Lane')) continue;
+      if (is(e, 'bpmn:BoundaryEvent') || is(e, 'bpmn:TextAnnotation') || is(e, 'bpmn:Group') || is(e, 'bpmn:Process') || is(e, 'bpmn:Collaboration')) continue;
+      const edgesH = [e.y, e.y + e.height], edgesV = [e.x, e.x + e.width];
+      const runs = segs.some(([p, q]) => {
+        if (Math.abs(p.y - q.y) < 1) return edgesH.some(y => Math.abs(p.y - y) < 4) && Math.min(Math.max(p.x, q.x), e.x + e.width) - Math.max(Math.min(p.x, q.x), e.x) > 12;
+        if (Math.abs(p.x - q.x) < 1) return edgesV.some(x => Math.abs(p.x - x) < 4) && Math.min(Math.max(p.y, q.y), e.y + e.height) - Math.max(Math.min(p.y, q.y), e.y) > 12;
+        return false;
+      });
+      if (runs) out.push(e.id);
+    }
+    return out;
+  }
+  /** Un flux entre ou sort d'une passerelle par une de ses pointes (pas au milieu d'un côté du losange). */
+  function offTips(c) {
+    let n = 0;
+    const w = c.waypoints;
+    for (const [g, p] of [[c.source, w[0]], [c.target, w[w.length - 1]]]) {
+      if (!is(g, 'bpmn:Gateway')) continue;
+      const cx = g.x + g.width / 2, cy = g.y + g.height / 2;
+      if (Math.abs(p.x - cx) > 2 && Math.abs(p.y - cy) > 2) n++;
+    }
+    return n;
+  }
   const lengthOf = pts => segsOfPts(pts).reduce((n, [p, q]) => n + Math.abs(p.x - q.x) + Math.abs(p.y - q.y), 0);
   function routeInfo(c) {
     const { overlap, cross, with: withIds } = flowConflicts(c);
     const clash = sideClashWith(c);
     if (clash) withIds.add(clash.id);
     const hits = crossedBy(c).length;
+    const hugs = bordersHugged(c).length, tips = offTips(c);
     const bends = bendCount(c.waypoints);
-    const cost = hits * 1000 + (clash ? (settled.has(clash.id) ? 1200 : 600) : 0) + overlap * 300 + cross * 80 + bends * 25 + lengthOf(c.waypoints) / 20;
-    return { cost, clean: !hits && !clash && !overlap && !cross, with: withIds, bends };
+    const cost = hits * 1000 + hugs * 500 + (clash ? (settled.has(clash.id) ? 1200 : 600) : 0) + overlap * 300 + tips * 150 + cross * 80 + bends * 25 + lengthOf(c.waypoints) / 20;
+    return { cost, clean: !hits && !hugs && !tips && !clash && !overlap && !cross, with: withIds, bends };
   }
   const routeCost = c => routeInfo(c).cost;
 
@@ -352,13 +381,18 @@ export function createApplier(modeler) {
 
   // ---------- commentaires ----------
   /** Retire les retours à la ligne et espaces en trop autour du texte ; hauteur ajustée au texte. */
-  function fitAnnotation(el) {
+  function fitAnnotation(el, { widen = false } = {}) {
     if (!is(el, 'bpmn:TextAnnotation')) return false;
     const bo = getBusinessObject(el);
     const raw = String(bo.text || '');
     const text = raw.replace(/[ \t]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
     let changed = false;
     if (text !== raw) { modeling.updateProperties(el, { text }); changed = true; }
+    // commentaire créé ou réécrit : plutôt large que haut (3 lignes visées, 320 px au plus) ; jamais rétréci
+    if (widen) {
+      const W = [160, 200, 240, 280, 320].find(w => lineCount(text, w - 10) <= 3) || 320;
+      if (el.width < W) { modeling.resizeShape(el, { x: el.x, y: el.y, width: W, height: el.height }); changed = true; }
+    }
     const need = Math.max(30, Math.ceil(lineCount(text, el.width - 10) * 14.4 + 12));
     if (Math.abs(el.height - need) > 3) { modeling.resizeShape(el, { x: el.x, y: el.y, width: el.width, height: need }); changed = true; }
     return changed;
@@ -381,7 +415,7 @@ export function createApplier(modeler) {
         if (noteLinks(note).includes(e)) continue;
         const segs = segsOfPts(e.waypoints);
         if (segs.some(([p, q]) => segmentHits(p, q, inflate(box, 6)))) n++;
-        else if (!is(e, 'bpmn:Association') && segs.some(([p, q]) => cutSeg(a, b, p, q))) n++;
+        else if (segs.some(([p, q]) => cutSeg(a, b, p, q))) n++;   // une flèche ou le pointillé d'un autre commentaire
         continue;
       }
       if (isContainerShape(e) || is(e, 'bpmn:Process') || is(e, 'bpmn:Collaboration')) continue;
@@ -658,9 +692,11 @@ export function createApplier(modeler) {
   }
 
   /** Décale vers la droite ce qui suit une position, pour faire de la place à un élément inséré. */
-  function makeRoom(x, width) {
+  /** Racine (plan) d'un élément : le diagramme principal ou la vue détaillée d'un sous-processus replié. */
+  const planeOf = e => { let r = e; while (r.parent) r = r.parent; return r; };
+  function makeRoom(x, width, plane = canvas.getRootElement()) {
     // libellés compris : sinon ceux des flux restent en place quand tout le reste se décale
-    const elements = registry.filter(e => e.parent && !e.waypoints);
+    const elements = registry.filter(e => e.parent && !e.waypoints && planeOf(e) === plane);
     let { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, 'x', width, x);
     // une note suit l'élément qu'elle commente, pas la ligne de décalage
     const moving = new Set(movingShapes);
@@ -811,6 +847,62 @@ export function createApplier(modeler) {
       && (e.parent === parent) && !(isContainerShape(e) && encloses(e, shape)) && hit(inflate(boxOf(shape), 2), boxOf(e))).map(e => e.id);
   }
 
+  /** Décale ce qui commence après start (axe x ou y) de delta ; refuse si cela crée un chevauchement. */
+  function shiftFrom(axis, start, delta, plane = canvas.getRootElement()) {
+    if (!delta) return;
+    const elements = registry.filter(e => e.parent && !e.waypoints && planeOf(e) === plane);
+    const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(elements, axis, Math.abs(delta), start);
+    if (!movingShapes.length && !resizingShapes.length) return;
+    modeling.createSpace(movingShapes, resizingShapes, axis === 'x' ? { x: delta, y: 0 } : { x: 0, y: delta }, axis === 'x' ? 'e' : 's', start);
+    if (delta < 0) {
+      const bad = movingShapes.filter(e => e.type !== 'label').flatMap(e => overlapsOf(e).map(o => `${e.id}/${o}`));
+      if (bad.length) throw new OpError(`pas assez de place pour resserrer de ${-delta} px : chevauchement (${bad.slice(0, 4).join(', ')}). Essayez un décalage plus petit.`);
+    }
+  }
+  const MAX_COLUMN_GAP = 130, COLUMN_GAP = 70;
+  /**
+   * Colonnes vides : là où aucun élément, libellé ni commentaire n'occupe une bande verticale de plus de
+   * MAX_COLUMN_GAP px, on resserre à COLUMN_GAP px (ce qui suit est décalé, le pool se resserre).
+   */
+  function compactColumns() {
+    let saved = 0;
+    for (let guard = 0; guard < 40; guard++) {
+      // éléments du plan affiché (pas ceux des vues détaillées des sous-processus repliés)
+      const root = canvas.getRootElement();
+      const rootOf = planeOf;
+      const items = registry.filter(e => e.parent && !e.waypoints && Number.isFinite(e.width) && e.width > 0
+        && !is(e, 'bpmn:Participant') && !is(e, 'bpmn:Lane') && rootOf(e) === root);
+      const spans = items.map(e => [e.x, e.x + e.width]).sort((a, b) => a[0] - b[0]);
+      let gap = null, end = -Infinity;
+      for (const [a, b] of spans) {
+        if (end > -Infinity && a - end > MAX_COLUMN_GAP) { gap = { start: end, size: a - end }; break; }
+        end = Math.max(end, b);
+      }
+      if (!gap) break;
+      const d = Math.round(gap.size - COLUMN_GAP);
+      const mark = commandStack._stackIdx;
+      try { shiftFrom('x', gap.start + gap.size - 1, -d); saved += d; }
+      catch { undoTo(mark); break; }
+    }
+    return saved;
+  }
+  /** Pools : retire le vide à droite et en bas (au-delà de 60 px de marge). */
+  function trimPools() {
+    let n = 0;
+    for (const p of registry.filter(e => is(e, 'bpmn:Participant') && Number.isFinite(e.width))) {
+      if ((p.children || []).some(c => is(c, 'bpmn:Lane'))) continue;
+      const inside = registry.filter(e => e.parent && !e.waypoints && e.type !== 'label' && e !== p && (() => { for (let q = e.parent; q; q = q.parent) if (q === p) return true; return false; })());
+      if (!inside.length) continue;
+      const labels = inside.flatMap(e => ownLabel(e));
+      const flowsPts = registry.filter(e => e.waypoints && e.parent === p).flatMap(e => e.waypoints);
+      const right = Math.max(...inside.map(e => e.x + e.width), ...labels.map(l => l.x + l.width), ...flowsPts.map(q => q.x)) + 60;
+      const bottom = Math.max(...inside.map(e => e.y + e.height), ...labels.map(l => l.y + l.height), ...flowsPts.map(q => q.y)) + 60;
+      const w = Math.max(right - p.x, 300), h = Math.max(bottom - p.y, 120);
+      if (p.width - w > 20 || p.height - h > 20) { modeling.resizeShape(p, { x: p.x, y: p.y, width: Math.min(p.width, w), height: Math.min(p.height, h) }); n++; }
+    }
+    return n;
+  }
+
   /** Après un déplacement : redresser les flux reliés qui peuvent l'être, replacer libellés et commentaires. */
   function afterMove(el) {
     if (is(el, 'bpmn:TextAnnotation')) { placeNote(el); return; }
@@ -828,7 +920,31 @@ export function createApplier(modeler) {
       if (typeof op.name === 'string') op.name = op.name.trim();
       if (op.name !== undefined) { checkFits(el, op.name); modeling.updateLabel(el, op.name); }
       if (op.documentation !== undefined) setDoc(el, op.documentation);
-      if (is(el, 'bpmn:TextAnnotation')) { fitAnnotation(el); placeNote(el); }
+      if (is(el, 'bpmn:TextAnnotation')) { fitAnnotation(el, { widen: op.name !== undefined }); placeNote(el); }
+    },
+
+    /** Redimensionne un élément (commentaire, sous-processus déplié, pool) ; le coin haut gauche reste en place. */
+    resize(op) {
+      const el = get(op.id);
+      if (el.waypoints) throw new OpError(`« ${op.id} » est un flux`);
+      const width = Number.isFinite(op.width) ? Math.round(op.width) : el.width, height = Number.isFinite(op.height) ? Math.round(op.height) : el.height;
+      if (width < 20 || height < 20) throw new OpError('taille trop petite (20 px au moins)');
+      if (/Task$|^bpmn:CallActivity$/.test(el.type) || is(el, 'bpmn:Event') || is(el, 'bpmn:Gateway')) throw new OpError('les tâches, événements et passerelles gardent leur taille standard : raccourcissez plutôt le nom');
+      modeling.resizeShape(el, { x: el.x, y: el.y, width, height });
+      if (is(el, 'bpmn:TextAnnotation')) fitAnnotation(el);
+    },
+
+    /**
+     * Décale d'un coup tout ce qui est à droite de x (ou de l'élément after) de dx px (négatif = resserrer),
+     * ou tout ce qui est sous y de dy px ; les pools et sous-processus traversés s'élargissent ou se resserrent.
+     */
+    space(op) {
+      const horizontal = Number.isFinite(op.dx);
+      if (!horizontal && !Number.isFinite(op.dy)) throw new OpError('indiquez dx (décalage horizontal) ou dy (vertical)');
+      const ref = op.after ? get(op.after, 'élément de référence') : null;
+      const start = horizontal ? (ref ? ref.x + ref.width + 1 : op.x) : (ref ? ref.y + ref.height + 1 : op.y);
+      if (!Number.isFinite(start)) throw new OpError(horizontal ? 'indiquez after (élément) ou x' : 'indiquez after (élément) ou y');
+      shiftFrom(horizontal ? 'x' : 'y', start, Math.round(horizontal ? op.dx : op.dy), ref ? planeOf(ref) : canvas.getRootElement());
     },
 
     append(op) {
@@ -848,7 +964,7 @@ export function createApplier(modeler) {
       const { source, target } = flow;
       const gap = target.x - (source.x + source.width);
       const need = shape.width + 100;
-      if (gap < need) makeRoom(source.x + source.width + 1, need - gap);
+      if (gap < need) makeRoom(source.x + source.width + 1, need - gap, planeOf(source));
       const s = flow.source, t = flow.target;
       const mid = { x: (s.x + s.width + t.x) / 2, y: s.y + s.height / 2 };
       const created = modeling.createShape(shape, mid, flow);
@@ -928,6 +1044,7 @@ export function createApplier(modeler) {
       const allNotes = registry.filter(e => is(e, 'bpmn:TextAnnotation'));
       for (const n of allNotes) if (fitAnnotation(n)) notesFixed++;
       settle();   // avant de resserrer : ce qui était droit et propre doit le rester
+      const cols = compactColumns();
       const rows = compactRows();
       settled = new Set([...settled].filter(id => { const c = registry.get(id); return c?.waypoints && bendCount(c.waypoints) === 0; }));
       const seqFlows = () => registry.filter(e => is(e, 'bpmn:SequenceFlow') && e.waypoints);
@@ -942,13 +1059,16 @@ export function createApplier(modeler) {
       settled = new Set();
       const labels = normalizeLabels(registry.filter(e => e.type === 'label'));
       for (const n of allNotes) if (placeNote(n)) notesFixed++;
+      const pools = trimPools();
       const remaining = seqFlows().map(c => [c.id, crossedBy(c)]).filter(([, h]) => h.length);
       const stacked = seqFlows().filter(c => flowConflicts(c).overlap).map(c => c.id);
       const crossing = seqFlows().filter(c => flowConflicts(c).cross).map(c => c.id);
       const clashes = registry.filter(e => e.type === 'label' && e.width && e.labelTarget && labelClashes(e).length).map(l => l.labelTarget.id);
       const badNotes = noteCrossings();
-      notes.push(`Retouches : ${rows} élément(s) remonté(s), ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) replacé(s), ${notesFixed} commentaire(s) ajusté(s).`
+      const hugging = seqFlows().filter(c => bordersHugged(c).length).map(c => `${c.id} (${bordersHugged(c).join(', ')})`);
+      notes.push(`Retouches : ${cols ? `${cols} px de colonnes vides resserrés, ` : ''}${pools ? `${pools} pool(s) ajusté(s), ` : ''}${rows} élément(s) remonté(s), ${exits} sortie(s) de passerelle séparée(s), ${flows} flux retracé(s), ${labels} libellé(s) replacé(s), ${notesFixed} commentaire(s) ajusté(s).`
         + (remaining.length ? ` Flux qui traversent encore un élément : ${remaining.map(([id, h]) => `${id} (${h.join(', ')})`).join(' ; ')}.` : ' Plus aucun flux ne traverse un élément.')
+        + (hugging.length ? ` Flux qui longent encore le bord d'un élément : ${hugging.join(' ; ')}.` : '')
         + (stacked.length ? ` Flux encore superposés à un autre : ${stacked.join(', ')}.` : '')
         + (crossing.length ? ` Flux qui en croisent encore un autre : ${crossing.join(', ')} (déplacer une branche peut les supprimer).` : '')
         + (clashes.length ? ` Libellés encore en chevauchement : ${clashes.join(', ')}.` : '')
@@ -1055,24 +1175,26 @@ export function createApplier(modeler) {
 
   // Conteneurs (sous-processus dépliés, pools) : s'ils grandissent, on écarte ce qui les entoure.
   const isContainer = e => !e.waypoints && e.type !== 'label' && e.children?.some(c => c.type !== 'label') && (is(e, 'bpmn:SubProcess') || is(e, 'bpmn:Participant'));
-  const snapshot = () => new Map(registry.filter(isContainer).map(e => [e.id, { bottom: e.y + e.height, right: e.x + e.width }]));
+  const snapshot = () => new Map(registry.filter(isContainer).map(e => [e.id, { width: e.width, height: e.height }]));
   const isInside = (el, container) => { for (let p = el.parent; p; p = p.parent) if (p === container) return true; return false; };
 
+  /** Un conteneur qui a GRANDI (pas seulement bougé) écarte ce qui l'entoure, depuis son ancien bord. */
   function pushAround(before) {
     for (const [id, b] of before) {
       const c = registry.get(id);
       if (!c || !c.parent) continue;
-      const dy = c.y + c.height - b.bottom, dx = c.x + c.width - b.right;
-      const neighbours = registry.filter(e => e !== c && e.type !== 'label' && !e.waypoints && e.parent && !isInside(e, c));
+      const dy = c.height - b.height, dx = c.width - b.width;
+      const oldBottom = c.y + b.height, oldRight = c.x + b.width;
+      const neighbours = registry.filter(e => e !== c && e.type !== 'label' && !e.waypoints && e.parent && !isInside(e, c) && planeOf(e) === planeOf(c));
       if (dy > 0) {
-        const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'y', dy, b.bottom - 1);
+        const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'y', dy, oldBottom - 1);
         const moving = movingShapes.filter(e => !isInside(e, c) && e !== c);
-        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: 0, y: dy }, 's', b.bottom - 1);
+        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: 0, y: dy }, 's', oldBottom - 1);
       }
       if (dx > 0) {
-        const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'x', dx, b.right - 1);
+        const { movingShapes, resizingShapes } = spaceTool.calculateAdjustments(neighbours, 'x', dx, oldRight - 1);
         const moving = movingShapes.filter(e => !isInside(e, c) && e !== c);
-        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: dx, y: 0 }, 'e', b.right - 1);
+        if (moving.length) modeling.createSpace(moving, resizingShapes.filter(e => e !== c), { x: dx, y: 0 }, 'e', oldRight - 1);
       }
     }
   }
@@ -1105,7 +1227,7 @@ export function createApplier(modeler) {
     const added = [...after].filter(id => !before.has(id));
     try {
       const fresh = added.map(id => registry.get(id)).filter(Boolean);
-      for (const n of fresh.filter(e => is(e, 'bpmn:TextAnnotation'))) { fitAnnotation(n); placeNote(n); }
+      for (const n of fresh.filter(e => is(e, 'bpmn:TextAnnotation'))) { fitAnnotation(n, { widen: true }); placeNote(n); }
       normalizeLabels(fresh.map(e => e.label).filter(Boolean));
     } catch (e) { console.warn('mise en forme des ajouts', e); }
     const changed = [...touched].filter(id => after.has(id) && registry.get(id));
@@ -1127,6 +1249,8 @@ export function createApplier(modeler) {
   const focuser = createFocus(modeler);
   const focus = ids => focuser.show(ids.map(id => refs.get(id) || id), { maxZoom: 1.4, pad: 160 });
 
+  // diagnostic (tests) : coût détaillé d'un tracé
+  if (typeof window !== 'undefined') window.__aiRoute = id => { const c = registry.get(id); const i = routeInfo(c); return { ...i, with: [...i.with], hits: crossedBy(c), hugs: bordersHugged(c), tips: offTips(c), fc: (({ overlap, cross }) => ({ overlap, cross }))(flowConflicts(c)), pts: c.waypoints.map(p => [p.x, p.y]) }; };
   return { apply, undoTo, focus, resolve: id => refs.get(id) || id, reset: () => refs.clear() };
 }
 

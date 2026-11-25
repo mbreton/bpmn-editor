@@ -205,15 +205,7 @@ export function geometryIssues(definitions) {
     out.push({ id: B.el.id, name: nameOf(B.el) || `${nameOf(B.el.sourceRef)} → ${nameOf(B.el.targetRef)}`, level: 'info', text: `le flux croise le flux ${A.el.id}.`, rule: 'flow-cross', fix: FIXES['flow-cross'] });
   }
 
-  // pointillés d'un commentaire qui traversent une boîte ou une flèche
-  for (const { el, pts } of edges) {
-    if (!is(el, 'bpmn:Association')) continue;
-    const ends = new Set([el.sourceRef?.id, el.targetRef?.id, el.sourceRef?.attachedToRef?.id, el.targetRef?.attachedToRef?.id].filter(Boolean));
-    const note = [el.sourceRef, el.targetRef].find(x => is(x, 'bpmn:TextAnnotation')) || el.sourceRef;
-    const box = shapes.find(sh => !ends.has(sh.el.id) && !ignorable(sh) && !isContainer(sh) && segs(pts).some(([p, q]) => segHits(p, q, sh.b)));
-    const line = !box && seqEdges.find(e => segs(pts).some(([p, q]) => segs(e.pts).some(([r, t]) => cut(p, q, r, t))));
-    if (box || line) out.push({ id: note?.id || el.id, name: `Commentaire « ${String(note?.text || '').trim().replace(/\s+/g, ' ').slice(0, 40)} »`, level: 'warn', text: `son pointillé ${box ? `traverse « ${nameOf(box.el)} »` : `coupe le flux ${line.el.id}`}.`, rule: 'association-crosses', fix: FIXES['association-crosses'] });
-  }
+  // (pointillés des commentaires : pas un problème du diagramme ; la retouche les place au mieux, sans les signaler)
 
   // sorties de passerelle qui partent du même côté
   const sideOf = (b, pts) => {

@@ -15,10 +15,15 @@ export function createFocus(modeler) {
   const registry = modeler.get('elementRegistry');
   let highlighted = [];
   let anim = null;
+  let fade = null;
+  // le surlignage violet s'efface tout seul après quelques secondes, ou dès que l'utilisateur agit sur le diagramme
+  const eventBus = modeler.get('eventBus');
+  eventBus.on('element.mousedown', () => { if (highlighted.length) clear(); });
 
   const resolve = ids => ids.map(id => registry.get(id)).filter(e => e && e.type !== 'label');
 
   function clear() {
+    clearTimeout(fade);
     for (const id of highlighted) { try { canvas.removeMarker(id, 'ai-focus'); } catch { /* supprimé */ } }
     highlighted = [];
   }
@@ -30,6 +35,7 @@ export function createFocus(modeler) {
     if (highlight) {
       clear();
       for (const e of els) { canvas.addMarker(e.id, 'ai-focus'); highlighted.push(e.id); }
+      fade = setTimeout(clear, 6000);
     }
     const { x1, y1, x2, y2 } = bbox(els);
     const box = { x: x1 - pad, y: y1 - pad, width: x2 - x1 + 2 * pad, height: y2 - y1 + 2 * pad };
