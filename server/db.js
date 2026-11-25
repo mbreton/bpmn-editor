@@ -99,6 +99,16 @@ export function openDb(file) {
       revoked       INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS oauth_tokens_user ON oauth_tokens(user_id);
+    CREATE TABLE IF NOT EXISTS invitations (
+      id            TEXT PRIMARY KEY,
+      token_hash    TEXT NOT NULL UNIQUE,
+      email         TEXT NOT NULL COLLATE NOCASE,
+      name          TEXT,
+      created_by    TEXT,
+      created_at    INTEGER NOT NULL,
+      expires_at    INTEGER NOT NULL,
+      used_at       INTEGER
+    );
   `);
   return wrap(db);
 }
@@ -155,6 +165,22 @@ function wrap(db) {
       return this.userById(id);
     },
     deleteUser: id => q('DELETE FROM users WHERE id = ?').run(id).changes > 0,
+
+    // ---------- invitations (lien à usage unique ; seul le haché du jeton est stocké) ----------
+    createInvitation({ email, name, tokenHash, createdBy, expiresAt }) {
+      const id = newId();
+      q('DELETE FROM invitations WHERE email = ? AND used_at IS NULL').run(email);   // une seule invitation en cours par adresse
+      q('INSERT INTO invitations(id, token_hash, email, name, created_by, created_at, expires_at) VALUES(?, ?, ?, ?, ?, ?, ?)')
+        .run(id, tokenHash, email, name || null, createdBy, now(), expiresAt);
+      return id;
+    },
+    renewInvitation: (id, tokenHash, expiresAt) => q('UPDATE invitations SET token_hash = ?, expires_at = ? WHERE id = ? AND used_at IS NULL').run(tokenHash, expiresAt, id).changes > 0,
+    listInvitations: () => q('SELECT i.*, u.name AS by_name FROM invitations i LEFT JOIN users u ON u.id = i.created_by WHERE i.used_at IS NULL ORDER BY i.created_at DESC').all()
+      .map(r => ({ id: r.id, email: r.email, name: r.name, createdAt: r.created_at, expiresAt: r.expires_at, expired: r.expires_at < now(), createdBy: r.by_name })),
+    invitationByToken: tokenHash => q('SELECT * FROM invitations WHERE token_hash = ?').get(tokenHash) ?? null,
+    invitationById: id => q('SELECT * FROM invitations WHERE id = ?').get(id) ?? null,
+    useInvitation: id => q('UPDATE invitations SET used_at = ? WHERE id = ? AND used_at IS NULL').run(now(), id).changes > 0,
+    deleteInvitation: id => q('DELETE FROM invitations WHERE id = ?').run(id).changes > 0,
 
     // ---------- index des diagrammes ----------
     listDiagrams: () => q('SELECT * FROM diagrams ORDER BY updated_at DESC').all().map(diagramOf),

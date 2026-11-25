@@ -348,3 +348,12 @@ textarea.field { resize: vertical; line-height: 1.45; }
 .el-issue { padding: 8px 10px; border-radius: 8px; font-size: 13px; background: var(--warn-bg); }
 .el-issue.err { background: var(--err-bg); }
 .el-issue .ck-problem { margin: 0; font-weight: 600; }
+
+/* invitations */
+.invite-form { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.invite-form .field { flex: 1 1 220px; }
+.invite-link { margin: 8px 0 14px; padding: 12px; border-radius: 10px; background: var(--panel); }
+.invite-link p { margin: 0 0 8px; }
+.invite-row { display: flex; gap: 8px; }
+.invite-row .field { flex: 1; font-size: 13px; }
+.small-title { font-size: 14px; margin: 12px 0 6px; }

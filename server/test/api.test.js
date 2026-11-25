@@ -218,3 +218,40 @@ test('migration depuis l\'ancien stockage SQLite vers Git', async () => {
   assert.equal(new Date(versions[1].createdAt).toISOString().slice(0, 10), '2026-11-20', 'dates d\'origine conservées');
   await m.close();
 });
+
+test('invitation : lien à usage unique, mot de passe choisi par la personne, compte actif', async () => {
+  // réservé à l'administrateur
+  assert.equal((await call('POST', '/api/invitations', { cookie: aliceCookie, body: { email: 'bob@test.fr' } })).statusCode, 403);
+  assert.equal((await call('POST', '/api/invitations', { cookie: adminCookie, body: { email: 'pas-un-mail' } })).statusCode, 400);
+  assert.equal((await call('POST', '/api/invitations', { cookie: adminCookie, body: { email: 'alice@test.fr' } })).statusCode, 409, 'compte déjà existant');
+  const first = (await call('POST', '/api/invitations', { cookie: adminCookie, body: { email: 'bob@test.fr', name: 'Bob' } })).json();
+  assert.ok(first.token && first.id);
+  // une nouvelle invitation pour la même adresse remplace l'ancienne
+  const inv = (await call('POST', '/api/invitations', { cookie: adminCookie, body: { email: 'bob@test.fr' } })).json();
+  assert.equal((await call('GET', `/api/invite/${first.token}`)).statusCode, 404, 'l\'ancien lien ne marche plus');
+  const list = (await call('GET', '/api/invitations', { cookie: adminCookie })).json();
+  assert.equal(list.filter(i => i.email === 'bob@test.fr').length, 1);
+  assert.ok(!JSON.stringify(list).includes(inv.token), 'le jeton n\'est jamais relisté');
+  // lecture publique du lien, puis acceptation
+  const open = await call('GET', `/api/invite/${inv.token}`);
+  assert.equal(open.statusCode, 200);
+  assert.equal(open.json().email, 'bob@test.fr');
+  assert.equal((await call('POST', `/api/invite/${inv.token}`, { body: { name: 'Bob Dupont', password: 'court' } })).statusCode, 400);
+  const ok = await call('POST', `/api/invite/${inv.token}`, { body: { name: 'Bob Dupont', password: 'motdepasse-bob' } });
+  assert.equal(ok.statusCode, 201);
+  assert.equal(ok.json().user.status, 'active');
+  const cookie = ok.headers['set-cookie']?.split(';')[0];
+  assert.equal((await call('GET', '/api/config', { cookie })).json().user.email, 'bob@test.fr', 'connecté directement');
+  // usage unique ; connexion ensuite avec e-mail + mot de passe choisi
+  assert.equal((await call('POST', `/api/invite/${inv.token}`, { body: { name: 'X', password: 'autre-motdepasse' } })).statusCode, 410);
+  assert.equal((await loginAs('bob@test.fr', 'motdepasse-bob')).r.statusCode, 200);
+  assert.equal((await call('GET', '/api/invitations', { cookie: adminCookie })).json().filter(i => i.email === 'bob@test.fr').length, 0, 'plus en attente');
+  // nouveau lien et annulation
+  const c = (await call('POST', '/api/invitations', { cookie: adminCookie, body: { email: 'carol@test.fr' } })).json();
+  const r2 = (await call('POST', `/api/invitations/${c.id}/renew`, { cookie: adminCookie })).json();
+  assert.notEqual(r2.token, c.token);
+  assert.equal((await call('GET', `/api/invite/${c.token}`)).statusCode, 404);
+  assert.equal((await call('GET', `/api/invite/${r2.token}`)).statusCode, 200);
+  assert.equal((await call('DELETE', `/api/invitations/${c.id}`, { cookie: adminCookie })).statusCode, 200);
+  assert.equal((await call('GET', `/api/invite/${r2.token}`)).statusCode, 404, 'annulée : le lien ne marche plus');
+});

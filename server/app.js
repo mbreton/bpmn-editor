@@ -5,7 +5,7 @@ import fastifyRateLimit from '@fastify/rate-limit';
 import fastifyWebsocket from '@fastify/websocket';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { openDb } from './db.js';
 import { createAuth } from './auth.js';
 import { createGitStore, GitError } from './git.js';
@@ -131,6 +131,72 @@ export async function buildApp(config) {
       fields.passwordHash = auth.hashPassword(password);
     }
     return db.updateUser(u.id, fields);
+  });
+
+  // ---------- invitations : l'administrateur génère un lien, la personne choisit son mot de passe ----------
+  const INVITE_DAYS = 7;
+  const tokenHash = t => createHash('sha256').update(String(t)).digest('hex');
+  const newInviteToken = () => { const token = randomBytes(24).toString('base64url'); return { token, hash: tokenHash(token), expiresAt: Date.now() + INVITE_DAYS * 86400e3 }; };
+  const validEmail = e => typeof e === 'string' && EMAIL_RE.test(e.trim()) && e.length <= 200;
+
+  app.get('/api/invitations', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    return db.listInvitations();
+  });
+
+  app.post('/api/invitations', async (req, reply) => {
+    const u = requireAdmin(req, reply); if (!u) return;
+    const { email, name } = req.body || {};
+    if (!validEmail(email)) return fail(reply, 400, 'Adresse e-mail invalide.');
+    if (name !== undefined && name !== '' && !str(name, 80, 2)) return fail(reply, 400, 'Nom : 2 à 80 caractères.');
+    if (db.userAuthByEmail(email.trim())) return fail(reply, 409, 'Un compte existe déjà avec cette adresse.');
+    const t = newInviteToken();
+    const id = db.createInvitation({ email: email.trim(), name: name?.trim() || null, tokenHash: t.hash, createdBy: u.id, expiresAt: t.expiresAt });
+    return reply.code(201).send({ id, email: email.trim(), token: t.token, expiresAt: t.expiresAt });
+  });
+
+  app.post('/api/invitations/:id/renew', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    const inv = db.invitationById(req.params.id);
+    if (!inv || inv.used_at) return fail(reply, 404, 'Invitation introuvable ou déjà utilisée.');
+    const t = newInviteToken();
+    db.renewInvitation(inv.id, t.hash, t.expiresAt);
+    return { id: inv.id, email: inv.email, token: t.token, expiresAt: t.expiresAt };
+  });
+
+  app.delete('/api/invitations/:id', async (req, reply) => {
+    if (!requireAdmin(req, reply)) return;
+    return db.deleteInvitation(req.params.id) ? { ok: true } : fail(reply, 404, 'Invitation introuvable.');
+  });
+
+  /** Lien d'invitation : pour qui il est, s'il est encore valable (sans connexion). */
+  const openInvitation = token => {
+    const inv = typeof token === 'string' && token.length <= 100 ? db.invitationByToken(tokenHash(token)) : null;
+    if (!inv) return { status: 404, error: 'Ce lien d\'invitation n\'est pas valable. Demandez-en un nouveau à l\'administrateur.' };
+    if (inv.used_at) return { status: 410, error: 'Ce lien d\'invitation a déjà été utilisé : connectez-vous avec votre e-mail et votre mot de passe.' };
+    if (inv.expires_at < Date.now()) return { status: 410, error: 'Ce lien d\'invitation a expiré. Demandez-en un nouveau à l\'administrateur.' };
+    return { inv };
+  };
+  app.get('/api/invite/:token', { config: { rateLimit: { max: 30, timeWindow: '10 minutes' } } }, async (req, reply) => {
+    const r = openInvitation(req.params.token);
+    if (r.error) return fail(reply, r.status, r.error);
+    return { email: r.inv.email, name: r.inv.name, expiresAt: r.inv.expires_at };
+  });
+  app.post('/api/invite/:token', { config: { rateLimit: { max: 10, timeWindow: '10 minutes' } } }, async (req, reply) => {
+    const r = openInvitation(req.params.token);
+    if (r.error) return fail(reply, r.status, r.error);
+    const { name, password } = req.body || {};
+    if (!str(name, 80, 2)) return fail(reply, 400, 'Nom requis (2 à 80 caractères).');
+    if (typeof password !== 'string' || password.length < 8 || password.length > 200) return fail(reply, 400, 'Mot de passe : 8 caractères minimum.');
+    if (db.userAuthByEmail(r.inv.email)) return fail(reply, 409, 'Un compte existe déjà avec cette adresse : connectez-vous.');
+    const user = db.tx(() => {
+      if (!db.useInvitation(r.inv.id)) return null;
+      const created = db.createUser({ email: r.inv.email, name: name.trim(), passwordHash: auth.hashPassword(password), status: 'active' });
+      return r.inv.created_by ? db.updateUser(created.id, { approvedBy: r.inv.created_by }) : created;
+    });
+    if (!user) return fail(reply, 410, 'Ce lien d\'invitation a déjà été utilisé.');
+    auth.issueSession(reply, req, user);
+    return reply.code(201).send({ user });
   });
 
   // ---------- administration des comptes ----------

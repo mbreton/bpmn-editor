@@ -22,6 +22,8 @@ async function route() {
   if (closeCurrent) { const c = closeCurrent; closeCurrent = null; await c(); }
   cfg = await api.config().catch(() => ({ user: null, ai: null, git: {} }));
   const path = location.pathname;
+  const inv = /^\/invite\/([\w-]+)\/?$/.exec(path);
+  if (inv) return renderInvite(inv[1]);
   // retour vers l'autorisation OAuth (connecteur Claude) après connexion
   const oauthNext = new URLSearchParams(location.search).get('next');
   const safeNext = oauthNext && /^\/oauth\/authorize\?/.test(oauthNext) ? oauthNext : null;
@@ -35,6 +37,44 @@ async function route() {
   if (path === '/admin' && cfg.user.role === 'admin') return renderAdmin();
   if (path !== '/') history.replaceState(null, '', '/');
   return renderLibrary();
+}
+
+// ---------- invitation : choisir son mot de passe ----------
+async function renderInvite(token) {
+  document.title = 'Invitation · Éditeur BPMN';
+  app.innerHTML = '<main class="center-page"><div class="card narrow auth"><p class="muted">Chargement…</p></div></main>';
+  let info;
+  try { info = await api.openInvite(token); }
+  catch (e) {
+    app.innerHTML = `<main class="center-page"><div class="card narrow auth"><div class="brand-mark" aria-hidden="true"></div><h1>Invitation</h1><p class="error">${esc(e.message)}</p><a class="btn block" href="/">Aller à la connexion</a></div></main>`;
+    return;
+  }
+  app.innerHTML = `<main class="center-page"><div class="card narrow auth">
+    <div class="brand-mark" aria-hidden="true"></div>
+    <h1>Bienvenue</h1>
+    <p class="muted">Vous êtes invité sur l'éditeur BPMN. Choisissez un mot de passe pour créer votre compte.</p>
+    <form id="invForm" novalidate>
+      <div class="fld"><label class="lbl" for="iEmail">E-mail (votre identifiant)</label><input class="field" id="iEmail" type="text" autocomplete="username" readonly></div>
+      <div class="fld"><label class="lbl" for="iName">Nom affiché</label><input class="field" id="iName" autocomplete="name" placeholder="Prénom Nom"></div>
+      <div class="fld"><label class="lbl" for="iPw">Mot de passe</label><input class="field" id="iPw" type="password" autocomplete="new-password"></div>
+      <div class="fld"><label class="lbl" for="iPw2">Confirmation</label><input class="field" id="iPw2" type="password" autocomplete="new-password"></div>
+      <p class="muted small">8 caractères minimum.</p>
+      <button class="btn primary block" type="submit">Créer mon compte</button>
+      <p class="error" id="err" role="alert"></p>
+    </form>
+  </div></main>`;
+  $('#iEmail').value = info.email;
+  $('#iName').value = info.name || '';
+  ($('#iName').value ? $('#iPw') : $('#iName')).focus();
+  $('#invForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const name = $('#iName').value.trim(), pw = $('#iPw').value;
+    $('#err').textContent = '';
+    if (pw !== $('#iPw2').value) { $('#err').textContent = 'Les deux mots de passe ne correspondent pas.'; return; }
+    const btn = e.target.querySelector('[type=submit]'); btn.disabled = true;
+    try { await api.acceptInvite(token, name, pw); toast('Compte créé. Bienvenue !'); navigate('/', true); }
+    catch (err) { $('#err').textContent = err.message; btn.disabled = false; }
+  });
 }
 
 // ---------- connexion / inscription ----------
@@ -227,6 +267,15 @@ async function renderAdmin() {
   document.title = 'Administration · Éditeur BPMN';
   app.innerHTML = `<div class="lib">
     ${header('Administration')}
+    <section class="admin-sec"><h2>Inviter quelqu'un</h2><p class="muted">Saisissez son e-mail : un lien d'invitation est créé, à lui transmettre vous-même (mail, messagerie…). En l'ouvrant, la personne choisit son mot de passe ; son identifiant sera cet e-mail. Le lien sert une seule fois et reste valable ${'7'} jours.</p>
+      <form id="invite" class="invite-form" novalidate>
+        <input class="field" id="invEmail" type="text" inputmode="email" autocapitalize="none" spellcheck="false" placeholder="prenom.nom@exemple.fr" aria-label="E-mail de la personne invitée">
+        <input class="field" id="invName" placeholder="Nom (facultatif)" aria-label="Nom de la personne invitée">
+        <button class="btn primary" type="submit">Créer le lien</button>
+      </form>
+      <div id="invLink"></div>
+      <div id="invites" class="lib-list"></div>
+    </section>
     <section class="admin-sec"><h2>Comptes</h2><p class="muted">Les nouveaux comptes attendent votre validation. Un compte actif voit et peut modifier tous les diagrammes.</p><div id="users" class="lib-list"><p class="muted">Chargement…</p></div></section>
     <section class="admin-sec"><h2>Dépôt Git</h2><div id="git"><p class="muted">Chargement…</p></div></section>
   </div>`;
@@ -280,6 +329,57 @@ async function renderAdmin() {
     });
   }
 
+  const inviteUrl = token => `${location.origin}/invite/${token}`;
+  const copy = async text => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) await navigator.clipboard.writeText(text);
+      else {   // site en HTTP : pas d'API presse-papiers, on passe par une zone de texte
+        const t = Object.assign(document.createElement('textarea'), { value: text });
+        t.style.position = 'fixed'; t.style.opacity = '0';
+        document.body.append(t); t.select();
+        const ok = document.execCommand('copy'); t.remove();
+        if (!ok) throw new Error('copy');
+      }
+      toast('Lien copié.');
+    } catch { toast('Copie impossible : sélectionnez le lien et copiez-le.', 'error'); }
+  };
+  function showLink(r) {
+    const url = inviteUrl(r.token);
+    $('#invLink').innerHTML = `<div class="invite-link"><p>Lien pour <b>${esc(r.email)}</b>, valable jusqu'au ${esc(fmtDate(r.expiresAt))} :</p>
+      <div class="invite-row"><input class="field mono" readonly value="${esc(url)}" aria-label="Lien d'invitation"><button class="btn" type="button" id="copyInv">Copier</button></div>
+      <p class="muted small">Ce lien ne sera plus affiché : copiez-le maintenant (sinon, « Nouveau lien » en crée un autre).</p></div>`;
+    $('#copyInv').addEventListener('click', () => copy(url));
+    $('#invLink input').addEventListener('focus', e => e.target.select());
+    copy(url);
+  }
+  async function loadInvites() {
+    const list = await api.invitations();
+    $('#invites').innerHTML = list.length ? `<h3 class="small-title">Invitations en attente</h3>` + list.map(i => `<article class="lib-item">
+      <div class="lib-link"><b>${esc(i.email)}</b><span class="muted small">${i.name ? esc(i.name) + ' · ' : ''}invité le ${esc(fmtDate(i.createdAt))}${i.createdBy ? ' par ' + esc(i.createdBy) : ''} · ${i.expired ? 'lien expiré' : 'valable jusqu\'au ' + esc(fmtDate(i.expiresAt))}</span></div>
+      <span class="pill ${i.expired ? '' : 'warn'}">${i.expired ? 'Expirée' : 'En attente'}</span>
+      <button class="btn small ghost" data-i="renew" data-id="${esc(i.id)}">Nouveau lien</button>
+      <button class="btn small ghost danger" data-i="del" data-id="${esc(i.id)}">Annuler</button>
+    </article>`).join('') : '';
+    $('#invites').onclick = async e => {
+      const b = e.target.closest('button[data-i]');
+      if (!b) return;
+      try {
+        if (b.dataset.i === 'renew') showLink(await api.renewInvitation(b.dataset.id));
+        else { await api.deleteInvitation(b.dataset.id); toast('Invitation annulée : le lien ne fonctionne plus.'); }
+        loadInvites();
+      } catch (err) { toast(err.message, 'error'); }
+    };
+  }
+  $('#invite').addEventListener('submit', async e => {
+    e.preventDefault();
+    const email = $('#invEmail').value.trim(), name = $('#invName').value.trim();
+    try {
+      showLink(await api.invite(email, name || undefined));
+      $('#invEmail').value = ''; $('#invName').value = '';
+      loadInvites();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+  loadInvites().catch(e => { $('#invites').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
   loadUsers().catch(e => { $('#users').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
   loadGit().catch(e => { $('#git').innerHTML = `<p class="error">${esc(e.message)}</p>`; });
 }
