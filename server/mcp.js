@@ -15,7 +15,10 @@ const text = t => ({ content: [{ type: 'text', text: t }] });
 const fail = t => ({ content: [{ type: 'text', text: t }], isError: true });
 const fmt = t => t ? new Date(t).toLocaleString('fr-FR', { timeZone: 'Europe/Paris', dateStyle: 'short', timeStyle: 'short' }) : '';
 
-export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, logActivity = () => {}, version = '1.0.0' }) {
+export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, git, logActivity = () => {}, version = '1.0.0' }) {
+  // La suppression n'est offerte à Claude que si un dépôt Git distant est branché : l'historique y est
+  // poussé, donc un diagramme supprimé reste récupérable. Sans distant, rien n'existe en dehors du serveur.
+  const gitConnected = !!git?.status?.remote;
   const issuesText = (issues, { max = 15, levels = ['error', 'warn'] } = {}) => {
     const shown = issues.filter(i => levels.includes(i.level));
     if (!shown.length) return 'Aucun problème de cohérence.';
@@ -42,7 +45,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, l
 
   function build(user, baseUrl) {
     const server = new McpServer({ name: 'editeur-bpmn', version }, {
-      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Chaque modification passe un contrôle de cohérence : si elle introduit un problème bloquant (condition manquante, référence cassée, délai invalide…), elle est refusée en entier avec l'explication ; corrigez et renvoyez. Les points « à vérifier » sont signalés sans bloquer. Les éléments ajoutés sont placés à une place libre ; si apply_changes signale un chevauchement ou si le rendu est confus, corrigez localement avec l'opération move (positions via get_diagram format "layout") plutôt qu'avec relayout, qui refait toute la disposition et n'est à utiliser que si l'utilisateur le demande. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification, explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
+      instructions: `Éditeur BPMN de ${user.name}. Les modifications vont dans le brouillon du diagramme (sauvegardé en continu, annulable avec undo) et s'affichent en direct dans le navigateur de l'utilisateur ; elles ne deviennent une version Git qu'avec save_version, à faire seulement quand l'utilisateur le demande. Commencez par list_diagrams puis get_diagram. Chaque modification passe un contrôle de cohérence : si elle introduit un problème bloquant (condition manquante, référence cassée, délai invalide…), elle est refusée en entier avec l'explication ; corrigez et renvoyez. Les points « à vérifier » sont signalés sans bloquer. Les éléments ajoutés sont placés à une place libre ; si apply_changes signale un chevauchement ou si le rendu est confus, corrigez localement avec l'opération move (positions via get_diagram format "layout") plutôt qu'avec relayout, qui refait toute la disposition et n'est à utiliser que si l'utilisateur le demande. Supprimer un diagramme (delete_diagram) n'est possible que si l'éditeur est branché à un dépôt Git distant, pour un administrateur, et après confirmation explicite de l'utilisateur. Utilisez show pour zoomer sur ce dont vous parlez, view_diagram pour vérifier le rendu après une modification, explore pour vérifier qu'un parcours se comporte comme l'utilisateur l'attend. Répondez en français.`
     });
     const url = id => `${baseUrl}/d/${id}`;
 
@@ -299,6 +302,38 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, l
       if (c?.error) return text(c.error);
       return text(`Copie « ${c.name} » créée [id ${c.id}] : ${url(c.id)}`);
     });
+
+    // ---------- suppression : seulement si un dépôt Git distant est branché (historique récupérable) ----------
+    if (gitConnected) {
+      server.registerTool('delete_diagram', {
+        title: 'Supprimer un diagramme',
+        description: 'Supprime un diagramme de l\'éditeur (son fichier est retiré du dépôt Git par un commit « Suppression » ; l\'historique reste dans Git, d\'où le diagramme peut être récupéré). Réservé aux administrateurs, et seulement disponible parce qu\'un dépôt Git distant est branché. Le brouillon non enregistré est perdu. Ne l\'appelez avec confirm: true qu\'après que l\'utilisateur a explicitement confirmé, en lui ayant rappelé le nom du diagramme ; sans confirm, l\'appel ne supprime rien et décrit ce qui serait perdu.',
+        inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme'), confirm: z.boolean().describe('true seulement après confirmation explicite de l\'utilisateur') }
+      }, async ({ diagram, confirm }) => {
+        const u = db.userById(user.id);
+        if (!(u?.role === 'admin' && u.status === 'active')) return fail('La suppression d\'un diagramme est réservée aux administrateurs.');
+        const d = find(diagram);
+        if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
+        const locked = guardLock(d); if (locked) return fail(locked);
+        const st = await diagrams.draftState(d.id);
+        const open = hub.openBy(d.id).filter(n => n !== user.name);
+        if (confirm !== true) {
+          return text([
+            `Rien n'a été supprimé. Demandez d'abord confirmation : supprimer « ${d.name} » [id ${d.id}] ?`,
+            st.dirty ? '⚠ Le brouillon contient des modifications non enregistrées : elles seraient perdues (save_version d\'abord si elles comptent).' : 'Le brouillon est identique à la dernière version enregistrée.',
+            open.length ? `⚠ Actuellement ouvert par : ${open.join(', ')}.` : '',
+            'Le fichier serait retiré du dépôt Git mais reste récupérable dans son historique.',
+            'Puis rappelez delete_diagram avec confirm: true.'
+          ].filter(Boolean).join('\n'));
+        }
+        try {
+          const ok = await diagrams.remove(d.id, user);
+          if (!ok) return fail(`Diagramme « ${d.name} » introuvable.`);
+        } catch (e) { return fail(`Suppression impossible : ${e.message}`); }
+        logActivity(user, { diagramId: d.id, kind: 'delete', via: 'claude', name: d.name });
+        return text(`Diagramme « ${d.name} » supprimé${st.dirty ? ' (brouillon non enregistré perdu)' : ''}. Il reste récupérable dans l'historique Git du dépôt (${git.subdir}/).`);
+      });
+    }
 
     // ---------- administration des comptes : seulement pour un compte administrateur ----------
     if (accounts && db.userById(user.id)?.role === 'admin') {

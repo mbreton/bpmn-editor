@@ -34,7 +34,7 @@ export async function buildApp(config) {
   const build = indexFile && existsSync(indexFile) ? createHash('sha256').update(readFileSync(indexFile)).digest('hex').slice(0, 12) : 'dev';
   const hub = createHub({ log, build });
   const accounts = createAccounts({ db, auth });
-  const mcp = createMcp({ db, diagrams, hub, checkDiagram, accounts, logActivity: (...a) => logActivity(...a), layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
+  const mcp = createMcp({ db, diagrams, hub, checkDiagram, accounts, git, logActivity: (...a) => logActivity(...a), layout: (d, user) => layoutDraft(d, user, { source: 'mcp' }) });
 
   // ---------- démarrage : dépôt, migration, index, administrateur ----------
   await git.init();

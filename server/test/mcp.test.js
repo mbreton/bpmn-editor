@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import WebSocket from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -232,6 +233,40 @@ test('MCP : administration des comptes (invitation, rôle, suppression), réserv
   assert.match(await txt('manage_invitation', { invitation: 'yann@test.fr', action: 'cancel' }), /annulée/);
   assert.equal((await http('GET', `/api/invite/${/\/invite\/([\w-]+)/.exec(renewed)[1]}`)).status, 404);
   await c.close();
+});
+
+test('MCP : suppression d\'un diagramme, seulement si un dépôt Git distant est branché', async () => {
+  // le premier serveur (sans dépôt distant) n'offre pas l'outil : voir la liste d'outils du premier test
+  const remote = join(tmp, 'remote-delete.git');
+  execFileSync('git', ['init', '-q', '--bare', '-b', 'main', remote]);
+  const app2 = await buildApp({ dbFile: join(tmp, 'db2.sqlite'), gitDir: join(tmp, 'repo2'), gitRemote: remote, gitSyncSeconds: 0, admin: { email: 'mathieu@test.fr', password: 'motdepasse', name: 'Mathieu' }, secureCookies: 'auto' });
+  await app2.listen({ port: 0, host: '127.0.0.1' });
+  const saved = { base, cookie };
+  base = `http://127.0.0.1:${app2.server.address().port}`;
+  let c;
+  try {
+    cookie = (await http('POST', '/api/login', { body: { email: 'mathieu@test.fr', password: 'motdepasse' } })).headers.get('set-cookie').split(';')[0];
+    const token = await tokenFor(cookie);
+    c = new Client({ name: 'test-delete', version: '1.0.0' });
+    await c.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${token}` } } }));
+    assert.ok((await c.listTools()).tools.some(t => t.name === 'delete_diagram'), 'dépôt distant branché : outil présent');
+    const txt = async (name, args) => (await c.callTool({ name, arguments: args })).content.map(x => x.text || '').join('\n');
+
+    assert.match(await txt('create_diagram', { name: 'À supprimer' }), /créé/);
+    assert.match(await txt('delete_diagram', { diagram: 'À supprimer', confirm: false }), /Rien n'a été supprimé/);
+    assert.match(await txt('list_diagrams', {}), /À supprimer/);
+    assert.match(await txt('delete_diagram', { diagram: 'inconnu', confirm: true }), /introuvable/);
+    assert.match(await txt('delete_diagram', { diagram: 'À supprimer', confirm: true }), /supprimé.*historique Git/);
+    assert.doesNotMatch(await txt('list_diagrams', {}), /À supprimer/);
+
+    // la suppression est un commit poussé vers le dépôt distant : le fichier reste récupérable
+    await app2.git.sync();
+    assert.match(execFileSync('git', ['-C', remote, 'log', '--format=%s', 'main'], { encoding: 'utf8' }), /Suppression : À supprimer/);
+  } finally {
+    await c?.close();
+    await app2.close();
+    ({ base, cookie } = saved);
+  }
 });
 
 test('MCP : accès révoqué', async () => {
