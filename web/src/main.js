@@ -3,6 +3,7 @@ import { api, ApiError, setUnauthorizedHandler } from './api.js';
 import { $, h, esc, fmtDate, toast, dialog } from './dom.js';
 import { openEditor } from './editor.js';
 import { avatarStack } from './avatars.js';
+import { connectLive } from './live.js';
 
 const app = $('#app');
 let cfg = null;
@@ -13,6 +14,23 @@ function navigate(path, replace = false) {
   route();
 }
 window.addEventListener('popstate', () => route());
+// Claude (connecteur MCP) peut ouvrir un diagramme dans la page déjà ouverte
+window.addEventListener('bpmn:navigate', e => { if (/^\/d\/[\w-]+$/.test(e.detail || '') && e.detail !== location.pathname) navigate(e.detail); });
+
+/** Hors de l'éditeur (liste, administration) : canal temps réel pour que Claude puisse ouvrir un diagramme ici. */
+function listenForClaude() {
+  const live = connectLive({
+    diagramId: '', holder: '',
+    getState: () => ({ editing: false, focused: document.hasFocus() }),
+    onMessage: m => {
+      if (m.type !== 'navigate' || !m.reqId) return;
+      if (!/^\/d\/[\w-]+$/.test(m.path || '')) return live.reply(m, { ok: false, error: 'Adresse invalide.' });
+      live.reply(m, { ok: true });
+      navigate(m.path);
+    }
+  });
+  closeCurrent = async () => live.close();
+}
 document.addEventListener('click', e => {
   const a = e.target.closest('a[data-link]');
   if (a && !e.metaKey && !e.ctrlKey && !e.shiftKey) { e.preventDefault(); navigate(a.getAttribute('href')); }
@@ -35,6 +53,7 @@ async function route() {
     closeCurrent = await openEditor(app, { id: m[1], user: cfg.user, cfg, onBack: () => navigate('/') });
     return;
   }
+  listenForClaude();
   if (path === '/admin' && cfg.user.role === 'admin') return renderAdmin();
   if (path !== '/') history.replaceState(null, '', '/');
   return renderLibrary();

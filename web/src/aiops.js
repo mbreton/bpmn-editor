@@ -1,7 +1,7 @@
 // Applique les opérations demandées par Claude (connecteur MCP) avec les services bpmn-js : chaque opération est une
 // commande annulable, et la mise en page des nouveaux éléments est calculée par l'éditeur
 // (placement automatique, insertion sur un flux), pas par Claude.
-import { is, getBusinessObject } from 'bpmn-js/lib/util/ModelUtil';
+import { is, getBusinessObject, getDi } from 'bpmn-js/lib/util/ModelUtil';
 import { createFocus } from './focus.js';
 import { labelOverflow, overflowText, overflowFix, lineCount } from '../../shared/labelfit.js';
 import { COLOR_PRESETS } from './colors.js';
@@ -710,6 +710,32 @@ export function createApplier(modeler) {
     return (a.outgoing || []).find(c => c.target === b);
   }
 
+  /** Flux désigné par son id (ou ref), ou par ses extrémités (from + to) : utile pour un flux créé par append / insert. */
+  function flowOf(op, fromKey = 'from') {
+    if (op.id || op.flow) {
+      const f = get(op.id || op.flow, 'flux');
+      if (!f.waypoints) throw new OpError(`« ${op.id || op.flow} » n'est pas un flux`);
+      return f;
+    }
+    if (!op[fromKey] || !op.to) throw new OpError(`indiquez l'id du flux, ou ses extrémités (${fromKey} + to)`);
+    const a = get(op[fromKey], 'source'), b = get(op.to, 'cible');
+    const f = flowBetween(a, b);
+    if (!f) throw new OpError(`aucun flux de « ${op[fromKey]} » vers « ${op.to} »`);
+    return f;
+  }
+
+  /** Options communes aux opérations qui créent un flux : ref du flux, nom, condition, flux par défaut. */
+  function flowOptions(flow, op, { name = op.flowName, condition = op.condition, ref = op.flowRef } = {}) {
+    if (!flow) return;
+    if (ref) refs.set(ref, flow.id);
+    if (name) modeling.updateLabel(flow, name);
+    if (condition) modeling.updateProperties(flow, { conditionExpression: expr(condition) });
+    if (op.default) {
+      if (!is(flow.source, 'bpmn:ExclusiveGateway') && !is(flow.source, 'bpmn:InclusiveGateway') && !is(flow.source, 'bpmn:ComplexGateway') && !is(flow.source, 'bpmn:Activity')) throw new OpError(`« ${flow.source.id} » ne peut pas avoir de flux par défaut`);
+      modeling.updateProperties(flow.source, { default: flow.businessObject });
+    }
+  }
+
   /** Décale vers la droite ce qui suit une position, pour faire de la place à un élément inséré. */
   /**
    * Le décalage (spaceTool) déplace les éléments et les tracés, pas les libellés des flux : ceux dont
@@ -755,6 +781,45 @@ export function createApplier(modeler) {
   const hit = (a, b) => a.x < b.x + b.width && b.x < a.x + a.width && a.y < b.y + b.height && b.y < a.y + a.height;
   const isContainerShape = e => is(e, 'bpmn:SubProcess') && e.collapsed !== true || is(e, 'bpmn:Participant') || is(e, 'bpmn:Lane');
   const boxOf = e => ({ x: e.x, y: e.y, width: e.width, height: e.height });
+  const boxOk = e => [e?.x, e?.y, e?.width, e?.height].every(Number.isFinite);
+  /** Ramène le centre pos à l'intérieur de la zone utile du conteneur (marges du titre / bandeau du pool). */
+  function clampInto(container, shape, pos) {
+    const left = is(container, 'bpmn:Participant') || is(container, 'bpmn:Lane') ? 30 : 0;
+    const top = is(container, 'bpmn:SubProcess') ? 25 : 10;
+    const x0 = container.x + left + 10 + shape.width / 2, x1 = container.x + container.width - 10 - shape.width / 2;
+    const y0 = container.y + top + shape.height / 2, y1 = container.y + container.height - 10 - shape.height / 2;
+    return { x: Math.round(x1 < x0 ? (x0 + x1) / 2 : Math.min(Math.max(pos.x, x0), x1)), y: Math.round(y1 < y0 ? (y0 + y1) / 2 : Math.min(Math.max(pos.y, y0), y1)) };
+  }
+
+  /**
+   * Éléments « fantômes » : présents à l'écran mais détachés du processus, ou sans position valide
+   * (restes d'une opération interrompue par une erreur, que l'annulation n'a pas pu défaire). Ils
+   * empêchent toute sauvegarde (référence vers un élément inexistant) : on les retire de l'écran et du dessin.
+   */
+  function purgeGhosts() {
+    const bad = e => {
+      if (!e.parent || e.type === 'label') return false;
+      if (e.waypoints) return e.waypoints.some(p => !Number.isFinite(p.x) || !Number.isFinite(p.y)) || !e.source || !e.target || !e.businessObject?.$parent;
+      return !boxOk(e) || !e.businessObject?.$parent;
+    };
+    const ghosts = new Set(registry.filter(bad));
+    for (const g of [...ghosts]) for (const c of [...(g.incoming || []), ...(g.outgoing || []), ...(g.attachers || [])]) ghosts.add(c);
+    if (!ghosts.size) return [];
+    const removed = [];
+    for (const g of ghosts) {
+      if (!registry.get(g.id)) continue;
+      const bo = g.businessObject, di = (() => { try { return getDi(g); } catch { return null; } })();
+      if (di?.$parent?.planeElement) di.$parent.planeElement = di.$parent.planeElement.filter(x => x !== di);
+      const owner = bo?.$parent;
+      for (const k of ['flowElements', 'artifacts']) if (owner?.[k]) owner[k] = owner[k].filter(x => x !== bo);
+      if (bo?.sourceRef?.outgoing) bo.sourceRef.outgoing = bo.sourceRef.outgoing.filter(x => x !== bo);
+      if (bo?.targetRef?.incoming) bo.targetRef.incoming = bo.targetRef.incoming.filter(x => x !== bo);
+      for (const l of g.labels || []) if (registry.get(l.id)) canvas.removeShape(l);
+      try { g.waypoints ? canvas.removeConnection(g) : canvas.removeShape(g); } catch { registry.remove(g); }
+      removed.push(g.id);
+    }
+    return removed;
+  }
   const ownLabel = sh => (sh.labels || []).filter(l => l.width);
 
   /** Ce qu'un élément doit éviter dans son conteneur : éléments, libellés, tracés des flux. */
@@ -987,6 +1052,48 @@ export function createApplier(modeler) {
     for (const n of ends.flatMap(e => noteLinks(e)).map(a => a.source === el ? a.target : a.source).filter(x => is(x, 'bpmn:TextAnnotation'))) placeNote(n);
   }
 
+  /**
+   * Fait entrer des éléments (id, ou ids pour un groupe) dans un conteneur (sous-processus déplié, pool,
+   * couloir), en gardant leur disposition relative : centrés sur x, y s'ils sont donnés, sinon calés à
+   * gauche dans le conteneur, qui s'agrandit si besoin. Les flux entre éléments du groupe suivent ; un flux
+   * qui relierait l'intérieur à l'extérieur d'un sous-processus est interdit en BPMN et disparaît (signalé).
+   */
+  function moveInto(op) {
+    const container = get(op.in, 'conteneur');
+    if (!isContainerShape(container)) throw new OpError(`« ${op.in} » n'est pas un conteneur déplié (sous-processus déplié, pool ou couloir)`);
+    const list = Array.isArray(op.ids) ? op.ids : [op.id];
+    const els = [...new Set(list.map(id => get(id)))];
+    for (const e of els) {
+      if (e.waypoints) throw new OpError(`« ${e.id} » est un flux : il suit ses extrémités`);
+      if (is(e, 'bpmn:BoundaryEvent')) throw new OpError(`« ${e.id} » est un événement de bordure : déplacez son activité`);
+      if (e === container || isInside(container, e)) throw new OpError(`« ${e.id} » contient « ${op.in} » : impossible de le mettre dedans`);
+    }
+    const shapes = els.flatMap(e => [e, ...(e.attachers || [])]);
+    const box = { x: Math.min(...els.map(e => e.x)), y: Math.min(...els.map(e => e.y)) };
+    box.width = Math.max(...els.map(e => e.x + e.width)) - box.x; box.height = Math.max(...els.map(e => e.y + e.height)) - box.y;
+    const inGroup = new Set(shapes);
+    const flowsBefore = [...new Set(shapes.flatMap(e => [...(e.incoming || []), ...(e.outgoing || [])]))].filter(c => is(c, 'bpmn:SequenceFlow'));
+    const crossing = flowsBefore.filter(c => !(inGroup.has(c.source) && inGroup.has(c.target))).map(c => c.id);
+    // sans position imposée : à droite de ce que le conteneur contient déjà ; on l'agrandit si besoin
+    const left = is(container, 'bpmn:Participant') || is(container, 'bpmn:Lane') ? 30 : 0, top = is(container, 'bpmn:SubProcess') ? 25 : 10;
+    const present = (container.children || []).filter(c => c.type !== 'label' && !c.waypoints && !inGroup.has(c));
+    const startX = present.length ? Math.max(...present.map(c => c.x + c.width)) + 50 - container.x : left + 30;
+    const needW = startX + box.width + 40, needH = box.height + top + 40;
+    if (container.width < needW || container.height < needH) {
+      modeling.resizeShape(container, { x: container.x, y: container.y, width: Math.max(container.width, needW), height: Math.max(container.height, needH) });
+    }
+    const num = v => (typeof v === 'string' && v.trim() !== '' ? Number(v) : v);
+    const cx = num(op.x), cy = num(op.y);
+    const want = Number.isFinite(cx) && Number.isFinite(cy) ? { x: cx - box.width / 2, y: cy - box.height / 2 } : { x: container.x + startX, y: present.length ? Math.min(...present.map(c => c.y + c.height / 2)) - box.height / 2 : container.y + top + Math.max(10, (container.height - top - box.height) / 2) };
+    const clampedC = clampInto(container, box, { x: want.x + box.width / 2, y: want.y + box.height / 2 });
+    const delta = { x: Math.round(clampedC.x - box.width / 2 - box.x), y: Math.round(clampedC.y - box.height / 2 - box.y) };
+    modeling.moveElements(els, delta, container);
+    for (const e of els) if (e.parent !== container) throw new OpError(`« ${e.id} » n'a pas pu entrer dans « ${op.in} »`);
+    const gone = crossing.filter(id => !registry.get(id));
+    if (gone.length) notes.push(`Flux supprimés car ils traversaient le bord du sous-processus : ${gone.join(', ')} ; reliez l'entrée et la sortie du sous-processus lui-même, et ajoutez un début / une fin à l'intérieur.`);
+    for (const e of els) afterMove(e);
+  }
+
   const OPS = {
     update(op) {
       const el = get(op.id);
@@ -1064,9 +1171,7 @@ export function createApplier(modeler) {
       const shape = autoPlace.append(source, newShape(op));
       finish(shape, op);
       placeFree(shape);
-      const flow = flowBetween(source, shape);
-      if (flow && op.flowName) modeling.updateLabel(flow, op.flowName);
-      if (flow && op.condition) modeling.updateProperties(flow, { conditionExpression: expr(op.condition) });
+      flowOptions(flowBetween(source, shape), op);
     },
 
     insert(op) {
@@ -1082,6 +1187,9 @@ export function createApplier(modeler) {
       const created = modeling.createShape(shape, mid, flow);
       finish(created, op);
       placeFree(created);
+      // le flux d'origine arrive sur l'élément ; le nouveau flux en repart vers l'ancienne cible
+      if (op.inRef) refs.set(op.inRef, flow.id);
+      flowOptions(flowBetween(created, target), op);
     },
 
     attach(op) {
@@ -1116,8 +1224,7 @@ export function createApplier(modeler) {
       else if (is(c, 'bpmn:MessageFlow')) layoutMessageFlow(c);
       else { loopBelowIfBackward(c); improveRoute(c); untanglePair(c); }
       fixGatewayExits(a);
-      if (op.name) modeling.updateLabel(c, op.name);
-      if (op.condition) modeling.updateProperties(c, { conditionExpression: expr(op.condition) });
+      flowOptions(c, op, { name: op.name, condition: op.condition, ref: null });
     },
 
     replace(op) {
@@ -1140,9 +1247,14 @@ export function createApplier(modeler) {
     add(op) {
       const parent = op.in ? get(op.in, 'conteneur') : registry.filter(e => is(e, 'bpmn:Participant') || is(e, 'bpmn:Process') && !e.parent).at(0) || canvas.getRootElement();
       if (is(parent, 'bpmn:SubProcess') && parent.collapsed !== false) throw new OpError(`« ${op.in} » est replié : dépliez-le d'abord (replace avec "expanded": true) ou travaillez dans sa vue détaillée`);
-      const pos = Number.isFinite(op.x) && Number.isFinite(op.y) ? { x: op.x, y: op.y }
-        : parent.width ? { x: parent.x + (is(parent, 'bpmn:Participant') ? 90 : 60), y: parent.y + parent.height / 2 } : { x: 200, y: 200 };
-      const created = modeling.createShape(newShape(op), pos, parent.waypoints ? parent.parent : parent);
+      if (parent.waypoints || parent.type === 'label' || !(isContainerShape(parent) || !parent.parent)) throw new OpError(`« ${op.in} » n'est pas un conteneur (sous-processus déplié, pool ou couloir)`);
+      const num = v => (typeof v === 'string' && v.trim() !== '' ? Number(v) : v);
+      const x = num(op.x), y = num(op.y);
+      const shape = newShape(op);
+      let pos = Number.isFinite(x) && Number.isFinite(y) ? { x, y }
+        : boxOk(parent) ? { x: parent.x + (is(parent, 'bpmn:Participant') ? 90 : 40) + shape.width / 2, y: parent.y + parent.height / 2 } : { x: 200, y: 200 };
+      if (boxOk(parent)) pos = clampInto(parent, shape, pos);
+      const created = modeling.createShape(shape, pos, parent);
       finish(created, op);
       placeFree(created);
     },
@@ -1213,6 +1325,7 @@ export function createApplier(modeler) {
      * décalage (dx, dy). Les flux suivent ; si la place est prise, l'élément glisse à la place libre la plus proche.
      */
     move(op) {
+      if (op.in) return moveInto(op);
       const owner = get(op.id);
       if (op.label) {
         // déplacer le libellé d'un élément ou d'un flux (décalage dx/dy uniquement)
@@ -1256,12 +1369,13 @@ export function createApplier(modeler) {
     },
 
     set_condition(op) {
-      const f = get(op.id, 'flux');
+      const f = flowOf(op);
       modeling.updateProperties(f, { conditionExpression: op.expression ? expr(op.expression) : undefined });
     },
 
     set_default(op) {
-      const g = get(op.gateway, 'passerelle'), f = get(op.flow, 'flux');
+      const g = get(op.gateway, 'passerelle');
+      const f = op.flow ? get(op.flow, 'flux') : flowOf({ ...op, from: op.gateway });
       if (f.source !== g) throw new OpError('le flux ne part pas de cette passerelle');
       modeling.updateProperties(g, { default: f.businessObject });
     }
@@ -1318,8 +1432,11 @@ export function createApplier(modeler) {
    * Renvoie { ok, added, changed, error, mark } ; mark permet d'annuler plus tard (refus).
    */
   let notes = [];
+  let currentOp = null;
   function apply(change) {
     notes = [];
+    const cleaned = purgeGhosts();
+    if (cleaned.length) notes.push(`Éléments fantômes retirés (restes d'une erreur précédente) : ${cleaned.join(', ')}.`);
     const mark = commandStack._stackIdx;
     const before = ids();
     const touched = new Set();
@@ -1330,12 +1447,17 @@ export function createApplier(modeler) {
         if (!fn) throw new OpError(`opération « ${op?.op} » inconnue`);
         for (const k of ['id', 'after', 'to', 'from', 'flow', 'gateway', 'next_to']) if (op[k] && before.has(refs.get(op[k]) || op[k])) touched.add(refs.get(op[k]) || op[k]);
         const containers = snapshot();
+        currentOp = op;
         fn(op);
         pushAround(containers);
       }
     } catch (e) {
-      undoTo(mark);
-      return { ok: false, error: e instanceof OpError ? e.message : `erreur de l'éditeur (${e.message})` };
+      try { undoTo(mark); } catch (u) { console.error('annulation incomplète', u); }
+      if (e instanceof OpError) return { ok: false, error: e.message };
+      console.error(e);
+      const left = purgeGhosts();
+      const where = String(e.stack || '').split('\n').find(l => /aiops/.test(l))?.trim().replace(/^at\s+/, '').replace(/\(?https?:\/\/[^)]*\/(src\/[^)?]+)[^)]*\)?/, '$1') || '';
+      return { ok: false, error: `erreur de l'éditeur (${e.message}${where ? ` — ${where}` : ''}), opération ${JSON.stringify(currentOp?.op || '?')}${left.length ? ` ; éléments incomplets retirés : ${left.join(', ')}` : ''}` };
     }
     const after = ids();
     const added = [...after].filter(id => !before.has(id));

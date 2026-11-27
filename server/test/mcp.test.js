@@ -113,7 +113,7 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   client = new Client({ name: 'test', version: '1.0.0' });
   await client.connect(new StreamableHTTPClientTransport(new URL(`${base}/mcp`), { requestInit: { headers: { authorization: `Bearer ${tokens.access_token}` } } }));
   const names = (await client.listTools()).tools.map(t => t.name).sort();
-  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'delete_user', 'duplicate_diagram', 'explore', 'get_diagram', 'history', 'invite_user', 'list_diagrams', 'list_users', 'manage_invitation', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'update_user', 'view_diagram'], 'compte administrateur : outils d\'administration présents');
+  assert.deepEqual(names, ['apply_changes', 'create_diagram', 'delete_user', 'duplicate_diagram', 'explore', 'get_diagram', 'history', 'invite_user', 'list_diagrams', 'list_users', 'manage_invitation', 'open_diagram', 'redo', 'relayout', 'restore_version', 'save_version', 'show', 'undo', 'update_user', 'view_diagram'], 'compte administrateur : outils d\'administration présents');
   const call = async (name, args) => (await client.callTool({ name, arguments: args }));
   const txt = r => r.content.map(c => c.text || '').join('\n');
 
@@ -127,6 +127,27 @@ test('MCP : lire, modifier à l\'écran, annuler, enregistrer, explorer, voir', 
   const closed = await call('apply_changes', { diagram: diagramId, changes: [{ title: 'Test', ops: [{ op: 'update', id: 'Task_Signer', name: 'x' }] }] });
   assert.equal(closed.isError, true);
   assert.match(txt(closed), /n'est ouvert dans aucun de vos navigateurs/);
+
+  // ouvrir le diagramme dans l'éditeur : aucune page ouverte, puis depuis la liste des diagrammes
+  const none = await call('open_diagram', { diagram: diagramId });
+  assert.equal(none.isError, true);
+  assert.match(txt(none), /Aucune page de l'éditeur n'est ouverte/);
+  const list = new WebSocket(`${base.replace('http', 'ws')}/api/ws`, { headers: { cookie } });
+  const asked = [];
+  list.on('message', raw => {
+    const m = JSON.parse(raw);
+    if (m.type !== 'navigate') return;
+    asked.push(m.path);
+    list.send(JSON.stringify({ type: 'response', reqId: m.reqId, ok: true }));
+    list.send(JSON.stringify({ type: 'hello', diagramId: m.path.split('/').pop(), holder: 'tab0' }));   // la page charge le diagramme
+  });
+  await new Promise(res => list.on('open', () => { list.send(JSON.stringify({ type: 'hello', diagramId: '', holder: '' })); res(); }));
+  const opened = await call('open_diagram', { diagram: 'onboarding' });
+  assert.deepEqual(asked, [`/d/${diagramId}`]);
+  assert.match(txt(opened), /est ouvert dans l'éditeur/);
+  assert.match(txt(await call('open_diagram', { diagram: diagramId })), /déjà ouvert/);
+  list.close();
+  await new Promise(res => setTimeout(res, 100));
 
   browser = await fakeBrowser();
   // une modification qui casse le workflow est refusée, avec l'explication ; rien n'est écrit

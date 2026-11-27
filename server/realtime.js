@@ -75,15 +75,31 @@ export function createHub({ log = console, build = 'dev' } = {}) {
     return mine[0] || null;
   }
 
+  /** Page la plus récemment active de `userId`, quelle qu'elle soit (liste des diagrammes ou éditeur). */
+  function pickUser(userId) {
+    const mine = [...clients].filter(c => c.user.id === userId && c.socket.readyState === 1);
+    mine.sort((a, b) => (b.focused !== false) - (a.focused !== false) || (b.lastActive - a.lastActive));
+    return mine[0] || null;
+  }
+
   /** Envoie une demande à une page et attend sa réponse. */
   function request(diagramId, userId, payload, timeoutMs = 20000) {
-    const c = pick(diagramId, userId);
+    return ask(pick(diagramId, userId), diagramId, payload, timeoutMs);
+  }
+
+  /** Demande à la page la plus active de la personne (ouvrir un diagramme, par exemple). */
+  function requestUser(userId, payload, timeoutMs = 10000) {
+    const c = pickUser(userId);
+    return ask(c, c?.diagramId || '', payload, timeoutMs);
+  }
+
+  function ask(c, diagramId, payload, timeoutMs) {
     if (!c) return Promise.resolve(null);
     const reqId = randomBytes(8).toString('hex');
     // Claude agit pour cette personne : les autres le voient dans la présence
     const first = !c.claudeAt || Date.now() - c.claudeAt > 60e3;
     c.claudeAt = Date.now();
-    if (first) presence(diagramId);
+    if (first && diagramId) presence(diagramId);
     return new Promise(resolve => {
       const timer = setTimeout(() => { waiting.delete(reqId); resolve({ ok: false, error: 'La page n\'a pas répondu à temps.' }); }, timeoutMs);
       waiting.set(reqId, { resolve, timer });
@@ -92,7 +108,7 @@ export function createHub({ log = console, build = 'dev' } = {}) {
   }
 
   return {
-    attach, broadcast, request,
+    attach, broadcast, request, requestUser,
     isOpen: (diagramId, userId) => !!pick(diagramId, userId),
     openBy: diagramId => [...new Set(viewers(diagramId).map(c => c.user.name))],
     peopleOn,
