@@ -57,7 +57,7 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, g
       return d;
     };
     const guardLock = d => (d.lock && d.lock.userId !== user.id) ? `${d.lock.author} est en train de modifier « ${d.name} » : je ne peux pas y toucher pour l'instant.` : null;
-    const notOpen = d => `« ${d.name} » n'est ouvert dans aucun de vos navigateurs. Ouvrez ${url(d.id)} pour que je puisse agir à l'écran.`;
+    const notOpen = d => `« ${d.name} » n'est ouvert dans aucun de vos navigateurs. Appelez open_diagram pour l'ouvrir dans la page de l'éditeur déjà ouverte, sinon demandez à l'utilisateur d'ouvrir ${url(d.id)}.`;
 
     async function model(xml) { return (await moddle.fromXML(xml, 'bpmn:Definitions')).rootElement; }
 
@@ -215,6 +215,24 @@ export function createMcp({ db, diagrams, hub, checkDiagram, layout, accounts, g
       if (r.status === 204) return text('Rien à enregistrer : le brouillon est identique à la dernière version.');
       hub.broadcast(d.id, { type: 'commit', rev: r.diagram.rev, version: r.diagram.version, by: user.name, message });
       return text(`Version ${r.diagram.version} enregistrée (${r.diagram.rev.slice(0, 7)}) : ${message}`);
+    });
+
+    server.registerTool('open_diagram', {
+      title: 'Ouvrir dans l\'éditeur',
+      description: 'Ouvre un diagramme dans l\'éditeur graphique, dans la page de l\'éditeur que l\'utilisateur a déjà ouverte (liste des diagrammes ou un autre diagramme ; ses modifications en cours sont sauvegardées avant). Nécessaire avant apply_changes, show, view_diagram ou explore sur un diagramme qui n\'est pas affiché. À faire quand l\'utilisateur demande à voir un diagramme, ou juste après en avoir créé ou dupliqué un pour y travailler.',
+      inputSchema: { diagram: z.string().describe('Identifiant ou nom du diagramme') }
+    }, async ({ diagram }) => {
+      const d = find(diagram);
+      if (!d) return fail(`Diagramme « ${diagram} » introuvable.`);
+      if (hub.isOpen(d.id, user.id)) return text(`« ${d.name} » est déjà ouvert dans votre navigateur (${url(d.id)}).`);
+      const r = await hub.requestUser(user.id, { type: 'navigate', path: `/d/${d.id}` }, 8000);
+      if (!r) return fail(`Aucune page de l'éditeur n'est ouverte dans vos navigateurs : ouvrez ${url(d.id)} (ou la liste des diagrammes, ${baseUrl}/), puis réessayez.`);
+      if (!r.ok) return fail(r.error || 'La page n\'a pas pu changer de diagramme.');
+      // la page charge le diagramme puis se reconnecte : on attend qu'elle soit prête à recevoir des actions
+      for (let i = 0; i < 40 && !hub.isOpen(d.id, user.id); i++) await new Promise(res => setTimeout(res, 250));
+      return hub.isOpen(d.id, user.id)
+        ? text(`« ${d.name} » est ouvert dans l'éditeur (${url(d.id)}).`)
+        : text(`Ouverture de « ${d.name} » demandée (${url(d.id)}) ; la page met du temps à charger, réessayez dans quelques secondes.`);
     });
 
     server.registerTool('show', {

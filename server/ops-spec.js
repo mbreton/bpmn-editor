@@ -10,10 +10,10 @@ Each change is an object:
 
 Operations (use existing ids from the diagram; give new elements a readable unique "ref" such as "Timer_RelanceKyc", reusable by later operations of the same or later changes):
 - {"op":"update","id":"<id>","name":"…","documentation":"…"}                       (only the fields to change)
-- {"op":"append","ref":"<newId>","after":"<id>","type":"bpmn:UserTask","name":"…"}  (creates the element after <id>, linked by a sequence flow; optional "flowName", "condition")
-- {"op":"insert","ref":"<newId>","flow":"<sequenceFlowId>","type":"…","name":"…"}   (splits an existing sequence flow and puts the element in the middle)
+- {"op":"append","ref":"<newId>","after":"<id>","type":"bpmn:UserTask","name":"…"}  (creates the element after <id>, linked by a sequence flow; optional "flowName", "condition", "default":true (this flow becomes the default flow of the gateway <id>), "flowRef" (a ref for the new flow, usable by later operations))
+- {"op":"insert","ref":"<newId>","flow":"<sequenceFlowId>","type":"…","name":"…"}   (splits an existing sequence flow and puts the element in the middle: the existing flow now ends on the element, a new flow leaves it towards the old target; "flowRef", "flowName", "condition", "default":true apply to that new outgoing flow, "inRef" names the incoming one)
 - {"op":"attach","ref":"<newId>","to":"<activityId>","event":"timer","interrupting":false,"name":"…"}  (boundary event on an activity or sub-process)
-- {"op":"connect","ref":"<newFlowId>","from":"<id>","to":"<id>","name":"…","condition":"\${…}"}
+- {"op":"connect","ref":"<newFlowId>","from":"<id>","to":"<id>","name":"…","condition":"\${…}"}   (also "default":true)
 - {"op":"replace","id":"<id>","type":"bpmn:ServiceTask"}                             (change element type, keeps connections; for events also "event")
 - {"op":"delete","id":"<id>"}   (deleting an element that has exactly one incoming and one outgoing flow reconnects its neighbours automatically: do not add a "connect" for them)
 - {"op":"reroute","id":"<sequenceFlowId>","route":"h:v|v:h|h:h|v:v"}   (redraw a flow: h:v = leave horizontally then turn vertically, v:h = leave vertically first…; or "via":[{"x":..,"y":..},…] bend points for a precise path, e.g. to loop back below the main line. "connect" also accepts "route" and "via"; without them, a flow going back to the left is automatically drawn below the elements it passes)
@@ -37,10 +37,12 @@ Operations (use existing ids from the diagram; give new elements a readable uniq
 - {"op":"tidy"}   (clean-up pass on the whole diagram: empty columns closed and the pool trimmed, rows pulled up when the gap above is too large, one exit side per gateway flow, flows redrawn (fewest conflicts then fewest bends, possibly redrawing the other flow of a crossing), labels re-placed at their fixed distance, comments trimmed, resized and moved next to their element; reports what is left. Run automatically after relayout)
 - reroute also accepts "side":"top|bottom|left|right" = the side of the source the flow leaves from. Two flows must never leave a gateway from the same side (it would look like one branches off the other): reroute refuses it.
 - {"op":"move","id":"<id>","next_to":"<otherId>","side":"right|left|below|above","gap":50}   (or "x","y" = new centre, or "dx","dy"; connected flows follow; if the spot is taken the element slides to the nearest free spot unless "avoid_overlap":false). With "label":true and dx/dy, moves only the label of an element or a flow
+- {"op":"move","ids":["<id>",…],"in":"<expandedSubProcessOrPoolOrLaneId>"}   (puts existing elements INTO a container, keeping their relative layout: next to what it already holds, or centred on "x","y"; the container grows if needed; flows between the moved elements follow, flows that would cross the border of a sub-process are removed (reported): reconnect the sub-process itself and add a start / end inside. To wrap blocks in a new sub-process: create it (append / insert with "type":"bpmn:SubProcess"), move the blocks in, then add a start event with "add" and connect)
 - {"op":"set_timer","id":"<eventId>","kind":"timeDuration|timeDate|timeCycle","value":"P3D"}
 - {"op":"set_interrupting","id":"<boundaryOrEventSubprocessStartId>","value":false}
-- {"op":"set_condition","id":"<sequenceFlowId>","expression":"\${montant > 1000}"}
-- {"op":"set_default","gateway":"<gatewayId>","flow":"<sequenceFlowId>"}
+- {"op":"set_condition","id":"<sequenceFlowId>","expression":"\${montant > 1000}"}   (or "from" + "to" instead of "id": the flow between these two elements, e.g. a flow just created by append / insert)
+- {"op":"set_default","gateway":"<gatewayId>","flow":"<sequenceFlowId>"}   (or "to":"<targetId>" instead of "flow")
+- A gateway (exclusive / inclusive) needs a condition or the default mark on EVERY outgoing flow, in the SAME change as the gateway: the coherence check runs at the end of the call and rejects everything otherwise. Use condition / default:true on append, insert and connect, or set_condition / set_default with from/to.
 - {"op":"set_error","id":"<eventId>","name":"Dossier expiré","code":"DOSSIER_EXPIRE"}   (also set_message / set_signal / set_escalation with "name")
 
 Element types: bpmn:Task, bpmn:UserTask, bpmn:ServiceTask, bpmn:ScriptTask, bpmn:SendTask, bpmn:ReceiveTask, bpmn:ManualTask, bpmn:BusinessRuleTask, bpmn:CallActivity, bpmn:SubProcess, bpmn:StartEvent, bpmn:EndEvent, bpmn:IntermediateCatchEvent, bpmn:IntermediateThrowEvent, bpmn:ExclusiveGateway, bpmn:ParallelGateway, bpmn:InclusiveGateway, bpmn:EventBasedGateway, bpmn:TextAnnotation.

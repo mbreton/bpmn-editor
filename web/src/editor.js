@@ -525,6 +525,12 @@ export async function openEditor(root, { id, user, cfg, onBack }) {
     if (m.type === 'focus' && m.userId === user.id) { focus.show(m.ids, { highlight: true }); return; }
     if (m.type === 'explore' && m.userId === user.id) { explorer.replay(m.choices); return; }
     if (m.type === 'apply') return live.reply(m, await applyFromClaude(m.changes));
+    if (m.type === 'navigate') {
+      if (!/^\/d\/[\w-]+$/.test(m.path || '')) return live.reply(m, { ok: false, error: 'Adresse invalide.' });
+      live.reply(m, { ok: true });
+      window.dispatchEvent(new CustomEvent('bpmn:navigate', { detail: m.path }));
+      return;
+    }
     if (m.type === 'render') return live.reply(m, await renderPng(m.area, m.ids || []));
   }
 

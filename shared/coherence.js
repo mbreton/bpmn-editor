@@ -23,7 +23,7 @@ export const FIXES = {
   'flow-ends': 'Supprimez ce flux et retracez-le entre les deux bons éléments.',
   unreachable: 'Tracez une flèche depuis l\'étape qui doit le précéder (survolez-la puis glissez la flèche de sa barre d\'outils), ou supprimez-le s\'il ne sert plus.',
   'implicit-end': 'Indiquez ce qui se passe ensuite : reliez-le à l\'étape suivante, ou ajoutez un événement de fin (cercle épais) pour dire que le parcours se termine là.',
-  conditions: 'Cliquez sur chaque flèche qui sort de la passerelle et saisissez sa condition, ou cochez « flux par défaut » sur celle à suivre quand aucune condition n\'est vraie.',
+  conditions: 'Cliquez sur chaque flèche qui sort de la passerelle et saisissez sa condition, ou cochez « flux par défaut » sur celle à suivre quand aucune condition n\'est vraie. Claude : set_condition (id du flux, ou from + to) / set_default (gateway + flow, ou gateway + to), dans la même modification.',
   'default-flow': 'Choisissez à nouveau le flux par défaut parmi les flèches qui sortent de cette passerelle.',
   'event-gateway': 'Après une passerelle basée sur les événements, chaque flèche doit mener à une attente (délai, message, signal…) : remplacez la cible par un événement intermédiaire d\'attente.',
   boundary: 'Posez l\'événement sur le bord d\'une tâche ou d\'un sous-processus et donnez-lui un déclencheur (délai, erreur, message…).',
@@ -88,7 +88,7 @@ export function checkCoherence(definitions) {
       }
       if ((is(e, 'bpmn:ExclusiveGateway') || is(e, 'bpmn:InclusiveGateway')) && outgoing > 1) {
         const loose = outs.filter(f => !f.conditionExpression?.body?.trim() && e.default !== f);
-        if (loose.length) add(e, 'error', `${loose.length} flux sortant(s) sans condition ni flux par défaut : on ne sait pas quel chemin prendre.`, 'conditions');
+        if (loose.length) add(e, 'error', `${loose.length} flux sortant(s) sans condition ni flux par défaut (${loose.map(f => `${f.id} → ${f.targetRef?.id || '?'}`).join(', ')}) : on ne sait pas quel chemin prendre.`, 'conditions');
       }
       if (e.default && !outs.includes(e.default)) add(e, 'error', 'le flux par défaut ne part pas de cet élément.', 'default-flow');
       if (is(e, 'bpmn:EventBasedGateway')) {
